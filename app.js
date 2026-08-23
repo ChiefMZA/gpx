@@ -529,8 +529,8 @@ function parkNameFromResult(result) {
   const parts = [parkName];
   if (isTokyo) parts.push(/tokyo/i.test(state) ? state : "Tokyo");
   else {
-    if (city) parts.push(city);
-    if (state && state.toLowerCase() !== city.toLowerCase()) parts.push(state);
+    if (state) parts.push(state);
+    else if (city) parts.push(city);
   }
   if (address.country) parts.push(address.country);
   return parts.filter((part, index) => parts.findIndex((value) => value.toLowerCase() === part.toLowerCase()) === index).join(", ");
@@ -601,17 +601,21 @@ async function importCoordinateFile(file) {
   elements.importNote.textContent = `Reading ${file.name}…`;
   try {
     const imported = parseImportedFile(await file.text());
+    const filenameName = parkNameFromFilename(file.name);
+    const importedName = imported.metadataName || filenameName;
     elements.coordinates.value = imported.points.map((point) => `${point.lat},${point.lon}`).join("\n");
-    elements.parkName.value = imported.metadataName;
+    elements.parkName.value = importedName;
     lastLookupSignature = "";
     invalidateRoute();
     updateFooter();
     const duplicateText = imported.duplicates ? ` ${imported.duplicates} duplicate(s) removed.` : "";
     elements.importNote.textContent = `${imported.kind} imported: ${imported.points.length} coordinates.${duplicateText}`;
     showStatus(`${file.name} is ready. Build the route.`);
-    if (imported.metadataName) {
+    if (importedName) {
       elements.lookupNote.classList.remove("error");
-      elements.lookupNote.textContent = `Name imported from GPX metadata: ${imported.metadataName}.`;
+      elements.lookupNote.textContent = imported.metadataName
+        ? `Name imported from GPX metadata: ${importedName}.`
+        : `Name inferred from the file: ${importedName}.`;
     } else {
       elements.lookupNote.textContent = "Finding a name near the imported coordinates…";
       lookupParkName(false, imported.points);
@@ -623,6 +627,25 @@ async function importCoordinateFile(file) {
   } finally {
     elements.fileInput.value = "";
   }
+}
+
+function parkNameFromFilename(filename) {
+  const base = filename.replace(/\.(?:gpx|txt)$/i, "").trim();
+  const parts = base.split(/__+/).map((part) => part.trim()).filter(Boolean);
+  if (parts.length < 3) return "";
+  const park = parts[0];
+  const country = parts[parts.length - 1];
+  const locationParts = parts.slice(1, -1).join(", ").split(",").map((part) => part.trim()).filter(Boolean);
+  let region = locationParts[locationParts.length - 1] || "";
+  if (/^canada$/i.test(country)) {
+    region = ({
+      AB: "Alberta", BC: "British Columbia", MB: "Manitoba", NB: "New Brunswick",
+      NL: "Newfoundland and Labrador", NS: "Nova Scotia", NT: "Northwest Territories",
+      NU: "Nunavut", ON: "Ontario", PE: "Prince Edward Island", QC: "Quebec",
+      SK: "Saskatchewan", YT: "Yukon",
+    })[region.toUpperCase()] || region;
+  }
+  return [park, region, country].filter(Boolean).join(", ");
 }
 
 function escapeXml(value) {
