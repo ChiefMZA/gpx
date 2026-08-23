@@ -1,0 +1,80 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>GPX Route Creator V2</title>
+  <link rel="preconnect" href="https://unpkg.com">
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" crossorigin="">
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <main class="app-shell">
+    <section class="control-panel">
+      <header class="app-header">
+        <div class="brand-mark" aria-hidden="true">⌁</div>
+        <div>
+          <p class="eyebrow">ROUTE LAB <span>V2</span></p>
+          <h1>Plot. Optimize. Go.</h1>
+          <p class="intro">Drop the points. We’ll handle the route.</p>
+        </div>
+      </header>
+
+      <div class="label-row coordinate-label">
+        <label for="coordinates">Coordinates</label>
+        <div class="label-actions">
+          <input id="file-input" type="file" accept=".gpx,.txt,application/gpx+xml,text/plain,application/xml,text/xml" hidden>
+          <button id="import-button" class="import-button" type="button"><span>＋</span> Import file</button>
+          <button id="clear-button" class="text-button" type="button">Clear</button>
+        </div>
+      </div>
+      <textarea id="coordinates" rows="12" spellcheck="false" placeholder="35.6285, 139.6228&#10;35.6291, 139.6242&#10;35.6278, 139.6250"></textarea>
+      <p id="import-note" class="hint">Paste <code>lat,lon</code> lines or import a GPX/TXT file.</p>
+
+      <label class="park-label" for="park-name">Park name</label>
+      <div class="field-row">
+        <input id="park-name" type="text" placeholder="Auto-detected after coordinates are added" autocomplete="off">
+        <button id="lookup-button" class="secondary icon-button" type="button" title="Find park name again">↻</button>
+      </div>
+      <p id="lookup-note" class="hint">The suggested name stays editable.</p>
+
+      <button id="build-button" class="primary" type="button"><span>✦</span> Build optimized route</button>
+
+      <div id="actions" class="actions" hidden>
+        <button id="gpx-button" class="secondary" type="button">Download GPX</button>
+        <button id="image-button" class="secondary" type="button">Download map PNG</button>
+      </div>
+      <p id="status" class="status" role="status"><span class="status-dot"></span><span id="status-text">Ready for coordinates.</span></p>
+    </section>
+
+    <section class="map-panel" aria-label="Route preview">
+      <div id="map"></div>
+      <button id="map-add-button" class="map-add-button" type="button" hidden>＋ Add points</button>
+      <div id="map-add-hint" class="map-mode-hint" hidden>Click map to add · click a marker to remove</div>
+      <div id="empty-map" class="empty-map">
+        <div>
+          <span class="map-icon">⌖</span>
+          <strong>Your route will appear here</strong>
+          <span>Build a route to preview the points.</span>
+        </div>
+      </div>
+      <footer id="map-footer" class="map-footer">
+        <div>
+          <span id="footer-label" class="footer-label">ROUTE READY</span>
+          <strong id="footer-name">Not set</strong>
+        </div>
+        <div class="footer-stats">
+          <div class="footer-numbers">
+            <span><b id="footer-points">0</b> points</span>
+            <span><b id="footer-distance">0.00</b> km</span>
+          </div>
+          <small>Tool created by chiefmza</small>
+        </div>
+      </footer>
+    </section>
+  </main>
+
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" crossorigin=""></script>
+  <script src="app.js"></script>
+</body>
+</html>
