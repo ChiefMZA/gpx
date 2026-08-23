@@ -351,7 +351,7 @@ function updateFooter() {
 function setMapAddMode(active) {
   mapAddMode = active && !elements.mapAddButton.hidden;
   elements.mapAddButton.classList.toggle("is-active", mapAddMode);
-  elements.mapAddButton.textContent = mapAddMode ? "✓ Finish adding" : "＋ Add points";
+  elements.mapAddButton.textContent = mapAddMode ? "✓ Finish editing" : "＋ Add/Edit Points";
   map.getContainer().classList.toggle("map-add-active", mapAddMode);
   elements.mapAddHint.hidden = !mapAddMode;
   if (mapAddMode) showStatus("Click anywhere on the map to add one or more points.");
@@ -422,7 +422,7 @@ function removeCoordinatePoint(point) {
   elements.footerLabel.textContent = "REBUILD NEEDED";
   elements.footerPoints.textContent = String(parsed.points.length);
   elements.footerDistance.textContent = "—";
-  showStatus("Point removed. Finish adding to rebuild the optimized route.");
+  showStatus("Point removed. Finish editing to rebuild the optimized route.");
 }
 
 function addPointFromMap(event) {
