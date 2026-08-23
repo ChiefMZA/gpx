@@ -5,12 +5,12 @@ A small browser-based GPX route tool. It:
 - accepts one `latitude,longitude` point per line;
 - imports `.gpx` and `.txt` files (including GPX XML saved with a `.txt` extension);
 - reads GPX waypoints, route points, track points, and the GPX metadata name;
-- removes duplicates and uses the same exact/heuristic open-route optimizer as V1;
+- removes duplicates and uses an exact/heuristic closed-loop route optimizer;
 - automatically suggests an editable `Park, City, Country` name using OpenStreetMap Nominatim;
 - previews the route on an OpenStreetMap map;
 - lets you enter **Add/Edit Points** mode after a build, place extra markers directly on
   the map, remove markers, and automatically rebuild when you finish;
-- option to download a GPX file and a tightly framed 1200 × 800 PNG map;
+- option to download a closed-loop GPX file and a tightly framed 1200 × 800 PNG map;
 
 After coordinates are imported, pasted, or edited, click **Build optimized route**.
 The GPX/PNG download buttons only appear for the currently built route and disappear

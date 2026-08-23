@@ -87,6 +87,8 @@ button { border-radius: 11px; font-weight: 800; }
 .route-marker { background: transparent; border: 0; }
 .route-pin { position: relative; width: 22px; height: 22px; border: 3px solid #fff; border-radius: 50% 50% 50% 0; background: #22bce7; box-shadow: 0 2px 7px rgb(0 0 0 / 45%); transform: rotate(-45deg); }
 .route-pin::after { position: absolute; inset: 5px; content: ""; border-radius: 50%; background: #fff; }
+.route-pin.start-pin { background: #25c46b; }
+.route-pin.finish-pin { background: #ff4f91; }
 .leaflet-bar a { color: #15182d; }
 @media (max-width: 850px) {
   body { overflow: auto; }

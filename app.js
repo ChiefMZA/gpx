@@ -37,7 +37,8 @@ let lookupRequestId = 0;
 let mapAddMode = false;
 let pendingMapPoints = [];
 
-const map = L.map("map", { zoomControl: true, attributionControl: true }).setView([20, 0], 2);
+const map = L.map("map", { zoomControl: false, attributionControl: true }).setView([20, 0], 2);
+L.control.zoom({ position: "bottomleft" }).addTo(map);
 L.tileLayer(TILE_URL, {
   maxZoom: 19,
   attribution: "&copy; OpenStreetMap contributors",
@@ -116,6 +117,7 @@ function routeDistance(route) {
   for (let index = 1; index < route.length; index += 1) {
     total += haversineMeters(route[index - 1], route[index]);
   }
+  if (route.length > 1) total += haversineMeters(route[route.length - 1], route[0]);
   return total;
 }
 
@@ -124,6 +126,15 @@ function distanceMatrix(points) {
 }
 
 function routeDistanceIndexes(route, distances) {
+  let total = 0;
+  for (let index = 1; index < route.length; index += 1) {
+    total += distances[route[index - 1]][route[index]];
+  }
+  if (route.length > 1) total += distances[route[route.length - 1]][route[0]];
+  return total;
+}
+
+function openRouteDistanceIndexes(route, distances) {
   let total = 0;
   for (let index = 1; index < route.length; index += 1) {
     total += distances[route[index - 1]][route[index]];
@@ -144,6 +155,49 @@ function exactOpenRoute(distances) {
     costs[offset] = 0;
     parents[offset] = -1;
   }
+  for (let mask = 1; mask < stateCount; mask += 1) {
+    for (let last = 0; last < count; last += 1) {
+      const currentCost = costs[mask * count + last];
+      if (!Number.isFinite(currentCost)) continue;
+      for (let next = 0; next < count; next += 1) {
+        const bit = 1 << next;
+        if (mask & bit) continue;
+        const nextMask = mask | bit;
+        const newCost = currentCost + distances[last][next];
+        const offset = nextMask * count + next;
+        if (newCost < costs[offset]) {
+          costs[offset] = newCost;
+          parents[offset] = last;
+        }
+      }
+    }
+  }
+  const fullMask = stateCount - 1;
+  let last = 0;
+  for (let point = 1; point < count; point += 1) {
+    if (costs[fullMask * count + point] < costs[fullMask * count + last]) last = point;
+  }
+  const reversed = [];
+  let mask = fullMask;
+  while (last !== -1) {
+    reversed.push(last);
+    const previous = parents[mask * count + last];
+    mask ^= 1 << last;
+    last = previous;
+  }
+  return reversed.reverse();
+}
+
+function exactClosedRoute(distances) {
+  const count = distances.length;
+  const stateCount = 1 << count;
+  const costs = new Float64Array(stateCount * count);
+  costs.fill(Infinity);
+  const parents = new Int16Array(stateCount * count);
+  parents.fill(-2);
+
+  costs[count] = 0;
+  parents[count] = -1;
 
   for (let mask = 1; mask < stateCount; mask += 1) {
     for (let last = 0; last < count; last += 1) {
@@ -164,9 +218,14 @@ function exactOpenRoute(distances) {
   }
 
   const fullMask = stateCount - 1;
-  let last = 0;
-  for (let point = 1; point < count; point += 1) {
-    if (costs[fullMask * count + point] < costs[fullMask * count + last]) last = point;
+  let last = 1;
+  let bestClosedCost = costs[fullMask * count + last] + distances[last][0];
+  for (let point = 2; point < count; point += 1) {
+    const closedCost = costs[fullMask * count + point] + distances[point][0];
+    if (closedCost < bestClosedCost) {
+      last = point;
+      bestClosedCost = closedCost;
+    }
   }
   const reversed = [];
   let mask = fullMask;
@@ -215,10 +274,9 @@ function cheapestInsertion(distances, startIndex, farthestFirst) {
     let best = null;
     remaining.forEach((point) => {
       for (let after = 0; after < route.length; after += 1) {
-        let delta = distances[route[after]][point];
-        if (after + 1 < route.length) {
-          delta += distances[point][route[after + 1]] - distances[route[after]][route[after + 1]];
-        }
+        const next = route[(after + 1) % route.length];
+        const delta = distances[route[after]][point] + distances[point][next]
+          - distances[route[after]][next];
         if (!best || delta < best.delta) best = { delta, point, after };
       }
     });
@@ -233,18 +291,12 @@ function improveTwoOpt(route, distances) {
   let improved = true;
   while (improved) {
     improved = false;
-    for (let first = 0; first < route.length - 1; first += 1) {
-      for (let last = first + 1; last < route.length; last += 1) {
-        let oldDistance = 0;
-        let newDistance = 0;
-        if (first > 0) {
-          oldDistance += distances[route[first - 1]][route[first]];
-          newDistance += distances[route[first - 1]][route[last]];
-        }
-        if (last + 1 < route.length) {
-          oldDistance += distances[route[last]][route[last + 1]];
-          newDistance += distances[route[first]][route[last + 1]];
-        }
+    for (let first = 1; first < route.length - 1; first += 1) {
+      for (let last = first; last < route.length; last += 1) {
+        const previous = route[first - 1];
+        const next = route[(last + 1) % route.length];
+        const oldDistance = distances[previous][route[first]] + distances[route[last]][next];
+        const newDistance = distances[previous][route[last]] + distances[route[first]][next];
         if (newDistance + 0.000001 < oldDistance) {
           route.splice(first, last - first + 1, ...route.slice(first, last + 1).reverse());
           improved = true;
@@ -261,24 +313,18 @@ function relocatePoints(route, distances) {
   while (true) {
     let bestDelta = 0;
     let bestMove = null;
-    for (let index = 0; index < route.length; index += 1) {
+    for (let index = 1; index < route.length; index += 1) {
       const point = route[index];
       const reduced = route.slice(0, index).concat(route.slice(index + 1));
-      let removalDelta;
-      if (index === 0) removalDelta = -distances[point][route[1]];
-      else if (index + 1 === route.length) removalDelta = -distances[route[index - 1]][point];
-      else {
-        removalDelta = distances[route[index - 1]][route[index + 1]]
-          - distances[route[index - 1]][point] - distances[point][route[index + 1]];
-      }
-      for (let slot = 0; slot <= reduced.length; slot += 1) {
-        let insertionDelta;
-        if (slot === 0) insertionDelta = distances[point][reduced[0]];
-        else if (slot === reduced.length) insertionDelta = distances[reduced[reduced.length - 1]][point];
-        else {
-          insertionDelta = distances[reduced[slot - 1]][point] + distances[point][reduced[slot]]
-            - distances[reduced[slot - 1]][reduced[slot]];
-        }
+      const previous = route[index - 1];
+      const next = route[(index + 1) % route.length];
+      const removalDelta = distances[previous][next]
+        - distances[previous][point] - distances[point][next];
+      for (let slot = 1; slot <= reduced.length; slot += 1) {
+        const before = reduced[slot - 1];
+        const after = reduced[slot % reduced.length];
+        const insertionDelta = distances[before][point] + distances[point][after]
+          - distances[before][after];
         const delta = removalDelta + insertionDelta;
         if (delta + 1e-9 < bestDelta) {
           bestDelta = delta;
@@ -301,7 +347,7 @@ function improveRoute(candidate, distances) {
   }
 }
 
-function bestHeuristicOpenRoute(distances) {
+function bestHeuristicClosedRoute(distances) {
   const nearest = distances.map((_, start) => nearestNeighbor(distances, start));
   nearest.sort((a, b) => routeDistanceIndexes(a, distances) - routeDistanceIndexes(b, distances));
   const candidates = nearest.slice(0, Math.min(24, nearest.length));
@@ -319,13 +365,25 @@ function bestHeuristicOpenRoute(distances) {
   return improved.reduce((best, route) => routeDistanceIndexes(route, distances) < routeDistanceIndexes(best, distances) ? route : best);
 }
 
+function preferredOpenRoute(distances) {
+  if (distances.length <= EXACT_OPTIMIZATION_LIMIT) return exactOpenRoute(distances);
+  return distances.map((_, start) => nearestNeighbor(distances, start))
+    .reduce((best, route) => openRouteDistanceIndexes(route, distances) < openRouteDistanceIndexes(best, distances) ? route : best);
+}
+
 function optimizeRoute(points) {
   if (points.length < 3) return [...points];
   const distances = distanceMatrix(points);
   const indexes = points.length <= EXACT_OPTIMIZATION_LIMIT
-    ? exactOpenRoute(distances)
-    : bestHeuristicOpenRoute(distances);
-  return indexes.map((index) => points[index]);
+    ? exactClosedRoute(distances)
+    : bestHeuristicClosedRoute(distances);
+  const openGuide = preferredOpenRoute(distances);
+  const anchor = indexes.indexOf(openGuide[0]);
+  const forward = indexes.slice(anchor).concat(indexes.slice(0, anchor));
+  const reverse = [forward[0], ...forward.slice(1).reverse()];
+  const selected = distances[forward[1]][openGuide[1]] <= distances[reverse[1]][openGuide[1]]
+    ? forward : reverse;
+  return selected.map((index) => points[index]);
 }
 
 function showStatus(message, error = false) {
@@ -473,17 +531,19 @@ function drawRoute() {
   if (markerLayer) markerLayer.remove();
 
   const latLngs = currentRoute.map((point) => [point.lat, point.lon]);
-  routeLayer = L.polyline(latLngs, { color: "#f24a2e", weight: 5, opacity: 0.95 }).addTo(map);
+  const loopLatLngs = currentRoute.length > 1 ? [...latLngs, latLngs[0]] : latLngs;
+  routeLayer = L.polyline(loopLatLngs, { color: "#f24a2e", weight: 5, opacity: 0.95 }).addTo(map);
   markerLayer = L.layerGroup().addTo(map);
-  const icon = L.divIcon({
-    className: "route-marker",
-    html: '<div class="route-pin"></div>',
-    iconSize: [22, 29],
-    iconAnchor: [11, 27],
-  });
   currentRoute.forEach((point, index) => {
+    const markerRole = index === 0 ? "start" : index === currentRoute.length - 1 ? "finish" : "route";
+    const icon = L.divIcon({
+      className: "route-marker",
+      html: `<div class="route-pin ${markerRole}-pin"></div>`,
+      iconSize: [22, 29],
+      iconAnchor: [11, 27],
+    });
     const marker = L.marker([point.lat, point.lon], { icon, bubblingMouseEvents: false })
-      .bindTooltip(`Point ${index + 1}<br>${point.lat}, ${point.lon}${mapAddMode ? "<br>Click to remove" : ""}`);
+      .bindTooltip(`${markerRole === "start" ? "Start" : markerRole === "finish" ? "Last point" : `Point ${index + 1}`}<br>${point.lat}, ${point.lon}${mapAddMode ? "<br>Click to remove" : ""}`);
     marker.on("click", () => {
       if (mapAddMode) showRemovePointPopup(point);
     });
@@ -703,7 +763,8 @@ function formatNumber(value) {
 
 function createGpx(name, route) {
   const safeName = escapeXml(name);
-  const waypoints = route.map((point) => `<wpt lat="${formatNumber(point.lat)}" lon="${formatNumber(point.lon)}"></wpt>`).join("\n");
+  const loopRoute = route.length > 1 ? [...route, route[0]] : route;
+  const waypoints = loopRoute.map((point) => `<wpt lat="${formatNumber(point.lat)}" lon="${formatNumber(point.lon)}"></wpt>`).join("\n");
   return `<?xml version="1.0" encoding="utf-8" standalone="yes"?>
 <gpx version="1.1" creator="https://discord.gg/GdAaWg4" xmlns="http://www.topografix.com/GPX/1/1">
 <metadata>
@@ -801,14 +862,14 @@ async function drawTiles(context, view, width) {
   await Promise.all(jobs);
 }
 
-function drawPin(context, x, y) {
+function drawPin(context, x, y, color = "#22bce7") {
   context.save();
   context.translate(x, y);
   context.beginPath();
   context.arc(0, -10, 10, Math.PI * 0.12, Math.PI * 0.88, true);
   context.lineTo(0, 8);
   context.closePath();
-  context.fillStyle = "#2eacd2";
+  context.fillStyle = color;
   context.fill();
   context.lineWidth = 3;
   context.strokeStyle = "#ffffff";
@@ -846,7 +907,7 @@ async function downloadMapImage() {
 
     if (canvasPoints.length > 1) {
       context.beginPath();
-      canvasPoints.forEach((point, index) => index ? context.lineTo(point.x, point.y) : context.moveTo(point.x, point.y));
+      [...canvasPoints, canvasPoints[0]].forEach((point, index) => index ? context.lineTo(point.x, point.y) : context.moveTo(point.x, point.y));
       context.lineJoin = "round";
       context.lineCap = "round";
       context.strokeStyle = "rgba(255,255,255,.9)";
@@ -856,7 +917,8 @@ async function downloadMapImage() {
       context.lineWidth = 6;
       context.stroke();
     }
-    canvasPoints.forEach((point) => drawPin(context, point.x, point.y));
+    canvasPoints.forEach((point, index) => drawPin(context, point.x, point.y,
+      index === 0 ? "#25c46b" : index === canvasPoints.length - 1 ? "#ff4f91" : "#22bce7"));
 
     context.fillStyle = "#14212b";
     context.fillRect(0, view.mapHeight, width, height - view.mapHeight);
