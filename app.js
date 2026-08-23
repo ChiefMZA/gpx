@@ -876,9 +876,7 @@ elements.coordinates.addEventListener("input", () => {
     try {
       const { points } = parseCoordinates(elements.coordinates.value);
       lookupParkName(false, points);
-    } catch (_) {
-      // Wait until the pasted/typed coordinate list is complete and valid.
-    }
+    } catch (_) {}
   }, 650);
 });
 elements.clearButton.addEventListener("click", () => {

@@ -1,9 +1,7 @@
-# Local exports and imported coordinate data
 *.gpx
 *.txt
 *.png
 
-# Editor and operating-system files
 .DS_Store
 Thumbs.db
 .vscode/
@@ -11,5 +9,4 @@ Thumbs.db
 *.log
 *.tmp
 
-# Local Windows launcher (not used by GitHub Pages)
 START V2.bat
