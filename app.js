@@ -576,11 +576,12 @@ function buildRoute() {
 
 function parkNameFromResult(result) {
   const address = result.address || {};
-  const isRoadResult = result.category === "highway" || result.addresstype === "road";
+  const parkTypes = ["park", "garden", "nature_reserve", "recreation_ground", "common"];
+  const isParkFeature = [result.type, result.addresstype].some((value) => parkTypes.includes(value))
+    || ["leisure", "natural"].includes(result.category);
   const parkName = [
     address.park, address.nature_reserve, address.garden, address.recreation_ground,
-    address.leisure, isRoadResult ? "" : result.name, isRoadResult ? "" : result.namedetails?.name,
-    address.neighbourhood, address.suburb, address.city_district,
+    address.leisure, isParkFeature ? result.name : "", isParkFeature ? result.namedetails?.name : "",
   ].find(Boolean);
   if (!parkName) return "";
 
@@ -610,10 +611,10 @@ function localityNameFromResult(result) {
 async function nearbyParkName(point) {
   await new Promise((resolve) => setTimeout(resolve, 1050));
   const latDelta = 0.02;
-  const lonDelta = latDelta / Math.max(0.35, Math.cos(point.lat * Math.PI / 180));
+  const lonDelta = 0.02;
   const url = new URL("https://nominatim.openstreetmap.org/search");
   url.search = new URLSearchParams({
-    format: "jsonv2", q: "park", bounded: "1", limit: "8",
+    format: "jsonv2", q: "park", bounded: "1", limit: "16",
     viewbox: `${point.lon - lonDelta},${point.lat + latDelta},${point.lon + lonDelta},${point.lat - latDelta}`,
     addressdetails: "1", namedetails: "1", "accept-language": "en",
   });
@@ -626,9 +627,14 @@ async function nearbyParkName(point) {
     const box = (result.boundingbox || []).map(Number);
     const contains = box.length === 4 && point.lat >= box[0] && point.lat <= box[1]
       && point.lon >= box[2] && point.lon <= box[3];
-    return { name: parkNameFromResult(result), contains, distance: haversineMeters(point, { lat, lon }) };
+    return {
+      name: parkNameFromResult(result), contains,
+      importance: Number(result.importance) || 0,
+      distance: haversineMeters(point, { lat, lon }),
+    };
   }).filter((item) => item.name && (item.contains || item.distance <= 500));
-  candidates.sort((a, b) => Number(b.contains) - Number(a.contains) || a.distance - b.distance);
+  candidates.sort((a, b) => Number(b.contains) - Number(a.contains)
+    || b.importance - a.importance || a.distance - b.distance);
   return candidates[0]?.name || "";
 }
 
@@ -670,8 +676,8 @@ async function lookupParkName(force = false, suppliedPoints = null) {
     if (!response.ok) throw new Error(`Lookup failed (${response.status}).`);
     const result = await response.json();
     if (requestId !== lookupRequestId) return;
-    let suggestedName = parkNameFromResult(result);
-    if (!suggestedName) suggestedName = await nearbyParkName(nearest);
+    let suggestedName = await nearbyParkName(nearest);
+    if (!suggestedName) suggestedName = parkNameFromResult(result);
     if (!suggestedName) suggestedName = localityNameFromResult(result);
     if (!suggestedName) throw new Error("No named place was found near these coordinates.");
     elements.parkName.value = suggestedName;
