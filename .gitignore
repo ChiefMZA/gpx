@@ -1,6 +1,7 @@
 *.gpx
 *.txt
 *.png
+!social-preview.png
 
 .DS_Store
 Thumbs.db
