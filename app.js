@@ -3,6 +3,11 @@
 const TILE_URL = "https://tile.openstreetmap.org/{z}/{x}/{y}.png";
 const EARTH_RADIUS_METERS = 6371008.8;
 const EXACT_OPTIMIZATION_LIMIT = 14;
+const OVERPASS_ENDPOINTS = [
+  "https://overpass-api.de/api/interpreter",
+  "https://overpass.kumi.systems/api/interpreter",
+  "https://overpass.private.coffee/api/interpreter",
+];
 
 const elements = {
   parkName: document.querySelector("#park-name"),
@@ -13,6 +18,9 @@ const elements = {
   fileInput: document.querySelector("#file-input"),
   importNote: document.querySelector("#import-note"),
   clearButton: document.querySelector("#clear-button"),
+  boundaryTools: document.querySelector("#boundary-tools"),
+  editOsmBoundary: document.querySelector("#edit-osm-boundary"),
+  resetOsmBoundary: document.querySelector("#reset-osm-boundary"),
   buildButton: document.querySelector("#build-button"),
   gpxButton: document.querySelector("#gpx-button"),
   imageButton: document.querySelector("#image-button"),
@@ -36,6 +44,14 @@ let lastLookupSignature = "";
 let lookupRequestId = 0;
 let mapAddMode = false;
 let pendingMapPoints = [];
+let osmBoundaryOriginal = [];
+let osmBoundaryPolygons = [];
+let osmBoundaryLayer = null;
+let osmBoundaryHandleLayer = null;
+let osmBoundaryEditMode = false;
+let osmBoundaryEdited = false;
+let osmBoundaryMetadata = null;
+const containingParkCache = new Map();
 
 const map = L.map("map", { zoomControl: false, attributionControl: true }).setView([20, 0], 2);
 L.control.zoom({ position: "bottomleft" }).addTo(map);
@@ -46,7 +62,170 @@ L.tileLayer(TILE_URL, {
 }).addTo(map);
 const pendingMarkerLayer = L.layerGroup().addTo(map);
 
+function pointInsidePolygon(point, vertices) {
+  let inside = false;
+  for (let index = 0, previous = vertices.length - 1; index < vertices.length; previous = index, index += 1) {
+    const a = vertices[index];
+    const b = vertices[previous];
+    const crosses = ((a.lat > point.lat) !== (b.lat > point.lat))
+      && point.lon < (b.lon - a.lon) * (point.lat - a.lat) / (b.lat - a.lat) + a.lon;
+    if (crosses) inside = !inside;
+  }
+  return inside;
+}
+
+function geoJsonToBoundaryPolygons(geometry) {
+  if (!geometry || !["Polygon", "MultiPolygon"].includes(geometry.type)) return [];
+  const source = geometry.type === "Polygon" ? [geometry.coordinates] : geometry.coordinates;
+  return source.map((polygon) => polygon.map((ring) => ring
+    .map((coordinate) => ({ lon: Number(coordinate[0]), lat: Number(coordinate[1]) }))
+    .filter((point) => Number.isFinite(point.lat) && Number.isFinite(point.lon)))
+    .filter((ring) => ring.length >= 4)).filter((polygon) => polygon.length);
+}
+
+function cloneBoundaryPolygons(polygons) {
+  return polygons.map((polygon) => polygon.map((ring) => ring.map((point) => ({ ...point }))));
+}
+
+function flattenBoundaryPoints(polygons = osmBoundaryPolygons) {
+  return polygons.flatMap((polygon) => polygon.flatMap((ring) => ring));
+}
+
+function pointInsideBoundary(point, polygons = osmBoundaryPolygons) {
+  return polygons.some((polygon) => {
+    if (!polygon.length || !pointInsidePolygon(point, polygon[0])) return false;
+    return !polygon.slice(1).some((hole) => pointInsidePolygon(point, hole));
+  });
+}
+
+function boundaryBounds(polygons) {
+  const points = flattenBoundaryPoints(polygons);
+  if (!points.length) return null;
+  return {
+    minLat: Math.min(...points.map((point) => point.lat)),
+    maxLat: Math.max(...points.map((point) => point.lat)),
+    minLon: Math.min(...points.map((point) => point.lon)),
+    maxLon: Math.max(...points.map((point) => point.lon)),
+  };
+}
+
+function boundaryToGeoJson(polygons = osmBoundaryPolygons) {
+  const coordinates = polygons.map((polygon) => polygon.map((ring) => ring.map((point) => [point.lon, point.lat])));
+  return polygons.length === 1
+    ? { type: "Polygon", coordinates: coordinates[0] }
+    : { type: "MultiPolygon", coordinates };
+}
+
+function removeOsmBoundaryHandles() {
+  if (osmBoundaryHandleLayer) osmBoundaryHandleLayer.remove();
+  osmBoundaryHandleLayer = null;
+}
+
+function updateOsmBoundaryControls() {
+  const available = osmBoundaryPolygons.length > 0;
+  elements.boundaryTools.hidden = !available;
+  elements.editOsmBoundary.textContent = osmBoundaryEditMode ? "✓ Finish editing" : "Edit OSM boundary";
+  elements.resetOsmBoundary.hidden = !available || !osmBoundaryEdited || osmBoundaryEditMode;
+}
+
+function drawOsmBoundary() {
+  if (osmBoundaryLayer) osmBoundaryLayer.remove();
+  osmBoundaryLayer = null;
+  if (!osmBoundaryPolygons.length) return;
+  osmBoundaryLayer = L.geoJSON(boundaryToGeoJson(), {
+    interactive: false,
+    style: { color: "#5b52ff", weight: 4, opacity: 0.95, fillColor: "#6c63ff", fillOpacity: 0.09 },
+  }).addTo(map);
+  if (routeLayer) routeLayer.bringToFront();
+  if (markerLayer) markerLayer.eachLayer((layer) => layer.bringToFront?.());
+}
+
+function finishOsmBoundaryEditing() {
+  if (!osmBoundaryEditMode) return;
+  osmBoundaryEditMode = false;
+  removeOsmBoundaryHandles();
+  map.getContainer().classList.remove("osm-boundary-edit-active");
+  elements.mapAddHint.hidden = true;
+  updateOsmBoundaryControls();
+  showStatus("Boundary editing finished. The adjusted boundary will be used in the PNG.");
+}
+
+function setOsmBoundary(polygons, metadata = null) {
+  finishOsmBoundaryEditing();
+  osmBoundaryOriginal = cloneBoundaryPolygons(polygons);
+  osmBoundaryPolygons = cloneBoundaryPolygons(polygons);
+  osmBoundaryEdited = false;
+  osmBoundaryMetadata = metadata;
+  drawOsmBoundary();
+  updateOsmBoundaryControls();
+}
+
+function clearOsmBoundary() {
+  finishOsmBoundaryEditing();
+  osmBoundaryOriginal = [];
+  osmBoundaryPolygons = [];
+  osmBoundaryEdited = false;
+  osmBoundaryMetadata = null;
+  if (osmBoundaryLayer) osmBoundaryLayer.remove();
+  osmBoundaryLayer = null;
+  updateOsmBoundaryControls();
+}
+
+function drawOsmBoundaryHandles() {
+  removeOsmBoundaryHandles();
+  osmBoundaryHandleLayer = L.layerGroup().addTo(map);
+  osmBoundaryPolygons.forEach((polygon) => polygon.forEach((ring) => {
+    const lastIsClosure = ring.length > 1
+      && ring[0].lat === ring[ring.length - 1].lat && ring[0].lon === ring[ring.length - 1].lon;
+    const editableLength = lastIsClosure ? ring.length - 1 : ring.length;
+    for (let vertexIndex = 0; vertexIndex < editableLength; vertexIndex += 1) {
+      const point = ring[vertexIndex];
+      const marker = L.marker([point.lat, point.lon], {
+        icon: L.divIcon({ className: "osm-boundary-handle", html: "<span></span>", iconSize: [11, 11], iconAnchor: [5.5, 5.5] }),
+        draggable: true, autoPan: true, bubblingMouseEvents: false, zIndexOffset: 2000,
+      });
+      const updateVertex = (event) => {
+        const latLng = event.target.getLatLng();
+        ring[vertexIndex] = { lat: latLng.lat, lon: latLng.lng };
+        if (lastIsClosure && vertexIndex === 0) ring[ring.length - 1] = { ...ring[0] };
+        osmBoundaryEdited = true;
+        drawOsmBoundary();
+      };
+      marker.on("drag", updateVertex);
+      marker.on("dragend", updateVertex);
+      marker.addTo(osmBoundaryHandleLayer);
+    }
+  }));
+}
+
+function startOsmBoundaryEditing() {
+  if (!osmBoundaryPolygons.length) return;
+  setMapAddMode(false);
+  osmBoundaryEditMode = true;
+  map.getContainer().classList.add("osm-boundary-edit-active");
+  elements.mapAddHint.hidden = false;
+  elements.mapAddHint.textContent = "Drag the purple boundary handles · then Finish editing";
+  drawOsmBoundaryHandles();
+  updateOsmBoundaryControls();
+  showStatus("Drag any purple vertex to adjust the OSM boundary.");
+}
+
+function resetOsmBoundary() {
+  if (!osmBoundaryOriginal.length) return;
+  finishOsmBoundaryEditing();
+  osmBoundaryPolygons = cloneBoundaryPolygons(osmBoundaryOriginal);
+  osmBoundaryEdited = false;
+  drawOsmBoundary();
+  updateOsmBoundaryControls();
+  showStatus("The original OSM boundary was restored.");
+}
+
 function parseCoordinates(text) {
+  const trimmedText = text.trim();
+  if (looksLikeXmlCoordinates(trimmedText)) {
+    return parseGpxXml(trimmedText);
+  }
+
   const points = [];
   const seen = new Set();
   let duplicates = 0;
@@ -54,9 +233,10 @@ function parseCoordinates(text) {
   text.split(/\r?\n/).forEach((rawLine, index) => {
     const line = rawLine.trim();
     if (!line) return;
-    const parts = line.split(",").map((part) => part.trim());
+    const unwrapped = line.replace(/^[\[(]\s*/, "").replace(/\s*[\])]$/, "");
+    const parts = unwrapped.split(/\s*(?:,|;|\t)\s*|\s+/).filter(Boolean);
     if (parts.length !== 2 || parts.some((part) => part === "")) {
-      throw new Error(`Line ${index + 1} must use latitude,longitude format.`);
+      throw new Error(`Line ${index + 1} must contain one latitude/longitude pair.`);
     }
     const lat = Number(parts[0]);
     const lon = Number(parts[1]);
@@ -79,24 +259,43 @@ function parseCoordinates(text) {
   return { points, duplicates };
 }
 
+function looksLikeXmlCoordinates(text) {
+  return /^\s*</.test(text) || /<(?:\w+:)?(?:gpx|wpt|rtept|trkpt)\b/i.test(text);
+}
+
+function parseGpxXml(text) {
+  const documentNode = new DOMParser().parseFromString(text, "application/xml");
+  if (documentNode.querySelector("parsererror")) throw new Error("The file contains invalid GPX/XML.");
+
+  const allElements = Array.from(documentNode.getElementsByTagName("*"));
+  const pointElements = allElements.filter((element) =>
+    ["wpt", "rtept", "trkpt"].includes((element.localName || element.nodeName).toLowerCase())
+  );
+  if (!pointElements.length) throw new Error("No GPX waypoints, route points, or track points were found.");
+
+  const coordinateText = pointElements.map((element) => {
+    const lat = element.getAttribute("lat");
+    const lon = element.getAttribute("lon");
+    if (lat === null || lon === null) throw new Error("A GPX point is missing its lat or lon attribute.");
+    return `${lat},${lon}`;
+  }).join("\n");
+  const parsed = parseCoordinates(coordinateText);
+
+  const namedContainer = allElements.find((element) =>
+    ["metadata", "trk", "rte"].includes((element.localName || element.nodeName).toLowerCase())
+    && Array.from(element.children).some((child) => (child.localName || child.nodeName).toLowerCase() === "name")
+  );
+  const metadataName = namedContainer
+    ? Array.from(namedContainer.children).find((element) => (element.localName || element.nodeName).toLowerCase() === "name")?.textContent?.trim() || ""
+    : "";
+  return { ...parsed, metadataName, kind: "GPX" };
+}
+
 function parseImportedFile(text) {
   const trimmed = text.trim();
   if (!trimmed) throw new Error("The selected file is empty.");
 
-  if (trimmed.startsWith("<") || /<(?:\w+:)?gpx\b/i.test(trimmed)) {
-    const documentNode = new DOMParser().parseFromString(trimmed, "application/xml");
-    if (documentNode.querySelector("parsererror")) throw new Error("The file contains invalid GPX/XML.");
-    const allElements = Array.from(documentNode.getElementsByTagName("*"));
-    const pointElements = allElements.filter((element) => ["wpt", "rtept", "trkpt"].includes(element.localName));
-    if (!pointElements.length) throw new Error("No GPX waypoints or track points were found.");
-    const coordinateText = pointElements.map((element) => `${element.getAttribute("lat")},${element.getAttribute("lon")}`).join("\n");
-    const parsed = parseCoordinates(coordinateText);
-    const metadata = allElements.find((element) => element.localName === "metadata");
-    const metadataName = metadata
-      ? Array.from(metadata.children).find((element) => element.localName === "name")?.textContent?.trim() || ""
-      : "";
-    return { ...parsed, metadataName, kind: "GPX" };
-  }
+  if (looksLikeXmlCoordinates(trimmed)) return parseGpxXml(trimmed);
 
   return { ...parseCoordinates(trimmed), metadataName: "", kind: "TXT" };
 }
@@ -393,7 +592,15 @@ function showStatus(message, error = false) {
 
 function getInputPoints() {
   try {
-    return parseCoordinates(elements.coordinates.value);
+    const parsed = parseCoordinates(elements.coordinates.value);
+    if (parsed.kind === "GPX") {
+      elements.coordinates.value = parsed.points.map((point) => `${point.lat},${point.lon}`).join("\n");
+      if (!elements.parkName.value.trim() && parsed.metadataName) elements.parkName.value = parsed.metadataName;
+      const duplicateText = parsed.duplicates ? ` ${parsed.duplicates} duplicate(s) removed.` : "";
+      elements.importNote.textContent = `GPX extracted: ${parsed.points.length} coordinates.${duplicateText}`;
+      elements.importNote.classList.remove("error");
+    }
+    return parsed;
   } catch (error) {
     showStatus(error.message, true);
     throw error;
@@ -407,6 +614,7 @@ function updateFooter() {
 }
 
 function setMapAddMode(active) {
+  if (active && osmBoundaryEditMode) finishOsmBoundaryEditing();
   mapAddMode = active && !elements.mapAddButton.hidden;
   elements.mapAddButton.classList.toggle("is-active", mapAddMode);
   elements.mapAddButton.textContent = mapAddMode ? "✓ Finish editing" : "＋ Add/Edit Points";
@@ -516,6 +724,7 @@ function invalidateRoute(message = "") {
   setMapAddMode(false);
   elements.mapAddButton.hidden = true;
   clearPendingMapPoints();
+  clearOsmBoundary();
   if (routeLayer) routeLayer.remove();
   if (markerLayer) markerLayer.remove();
   routeLayer = null;
@@ -549,7 +758,12 @@ function drawRoute() {
     });
     marker.addTo(markerLayer);
   });
-  if (currentRoute.length === 1) map.setView(latLngs[0], 17);
+  drawOsmBoundary();
+  if (osmBoundaryPolygons.length) {
+    const displayBounds = routeLayer.getBounds();
+    flattenBoundaryPoints().forEach((point) => displayBounds.extend([point.lat, point.lon]));
+    map.fitBounds(displayBounds, { padding: [45, 45], maxZoom: 17 });
+  } else if (currentRoute.length === 1) map.setView(latLngs[0], 17);
   else map.fitBounds(routeLayer.getBounds(), { padding: [45, 45], maxZoom: 17 });
   elements.emptyMap.hidden = true;
   setTimeout(() => map.invalidateSize(), 0);
@@ -608,34 +822,119 @@ function localityNameFromResult(result) {
     .join(", ");
 }
 
-async function nearbyParkName(point) {
+function sampledContainmentPoints(points) {
+  if (points.length <= 3) return points;
+  const center = points.reduce((sum, point) => ({ lat: sum.lat + point.lat, lon: sum.lon + point.lon }), { lat: 0, lon: 0 });
+  center.lat /= points.length;
+  center.lon /= points.length;
+  const nearest = points.reduce((best, point) => haversineMeters(point, center) < haversineMeters(best, center) ? point : best);
+  return [nearest, points[Math.floor(points.length / 3)], points[Math.floor(points.length * 2 / 3)]]
+    .filter((point, index, values) => values.findIndex((item) => item.lat === point.lat && item.lon === point.lon) === index);
+}
+
+function overpassParkQuery(points) {
+  const samples = sampledContainmentPoints(points);
+  const assignments = samples.map((point, index) => `is_in(${point.lat},${point.lon})->.inside${index};`).join("\n");
+  const selectors = samples.flatMap((_, index) => [
+    `area.inside${index}[name][leisure=park];`,
+    `area.inside${index}[name][leisure=garden];`,
+    `area.inside${index}[name][leisure=recreation_ground];`,
+    `area.inside${index}[name][leisure=nature_reserve];`,
+    `area.inside${index}[name][boundary=protected_area];`,
+  ]).join("\n");
+  return `[out:json][timeout:25];\n${assignments}\n(\n${selectors}\n);\nout tags center;`;
+}
+
+async function overpassContainingParkIds(points) {
+  const query = overpassParkQuery(points);
+  for (const endpoint of OVERPASS_ENDPOINTS) {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 28000);
+    try {
+      const response = await fetch(`${endpoint}?${new URLSearchParams({ data: query })}`, {
+        signal: controller.signal,
+      });
+      if (!response.ok) continue;
+      const payload = await response.json();
+      const ids = (payload.elements || []).map((area) => {
+        const id = Number(area.id);
+        if (area.type === "way") return `W${id}`;
+        if (area.type === "relation") return `R${id}`;
+        if (id >= 3600000000) return `R${id - 3600000000}`;
+        if (id >= 2400000000) return `W${id - 2400000000}`;
+        return "";
+      }).filter((value, index, values) => value && values.indexOf(value) === index);
+      return ids.slice(0, 25);
+    } catch (_) {
+      // Try the next public Overpass endpoint.
+    } finally {
+      clearTimeout(timeout);
+    }
+  }
+  return null;
+}
+
+async function containingOsmParkResult(point, routePoints = [point]) {
+  const cacheKey = sampledContainmentPoints(routePoints)
+    .map((sample) => `${sample.lat.toFixed(5)},${sample.lon.toFixed(5)}`).join(";");
+  if (containingParkCache.has(cacheKey)) return containingParkCache.get(cacheKey);
+  const osmIds = await overpassContainingParkIds(routePoints);
+  if (osmIds === null) return null;
+  if (!osmIds.length) {
+    containingParkCache.set(cacheKey, null);
+    return null;
+  }
   await new Promise((resolve) => setTimeout(resolve, 1050));
-  const latDelta = 0.02;
-  const lonDelta = 0.02;
-  const url = new URL("https://nominatim.openstreetmap.org/search");
+  const url = new URL("https://nominatim.openstreetmap.org/lookup");
   url.search = new URLSearchParams({
-    format: "jsonv2", q: "park", bounded: "1", limit: "16",
-    viewbox: `${point.lon - lonDelta},${point.lat + latDelta},${point.lon + lonDelta},${point.lat - latDelta}`,
-    addressdetails: "1", namedetails: "1", "accept-language": "en",
+    format: "jsonv2", osm_ids: osmIds.join(","), addressdetails: "1", namedetails: "1",
+    polygon_geojson: "1", polygon_threshold: "0", "accept-language": "en",
   });
-  const response = await fetch(url);
-  if (!response.ok) return "";
-  const results = await response.json();
-  const candidates = results.map((result) => {
-    const lat = Number(result.lat);
-    const lon = Number(result.lon);
-    const box = (result.boundingbox || []).map(Number);
-    const contains = box.length === 4 && point.lat >= box[0] && point.lat <= box[1]
-      && point.lon >= box[2] && point.lon <= box[3];
-    return {
-      name: parkNameFromResult(result), contains,
-      importance: Number(result.importance) || 0,
-      distance: haversineMeters(point, { lat, lon }),
-    };
-  }).filter((item) => item.name && (item.contains || item.distance <= 500));
-  candidates.sort((a, b) => Number(b.contains) - Number(a.contains)
-    || b.importance - a.importance || a.distance - b.distance);
-  return candidates[0]?.name || "";
+  try {
+    const response = await fetch(url);
+    if (!response.ok) return null;
+    const results = await response.json();
+    const candidates = results.map((result) => {
+      const boundary = geoJsonToBoundaryPolygons(result.geojson);
+      const coveredPoints = boundary.length
+        ? routePoints.filter((routePoint) => pointInsideBoundary(routePoint, boundary)).length : 0;
+      return {
+        name: parkNameFromResult(result), boundary,
+        contains: boundary.length ? pointInsideBoundary(point, boundary) : false,
+        coverage: routePoints.length ? coveredPoints / routePoints.length : 0,
+        importance: Number(result.importance) || 0,
+        osmType: result.osm_type || "", osmId: result.osm_id || "",
+      };
+    }).filter((candidate) => candidate.name && candidate.boundary.length
+      && (candidate.contains || candidate.coverage >= 0.5));
+    candidates.sort((a, b) => b.coverage - a.coverage || Number(b.contains) - Number(a.contains)
+      || b.importance - a.importance);
+    const selected = candidates[0] || null;
+    containingParkCache.set(cacheKey, selected);
+    return selected;
+  } catch (_) {
+    return null;
+  }
+}
+
+async function ensureOsmParkBoundary(points = currentRoute) {
+  if (osmBoundaryPolygons.length) return true;
+  if (!points.length) return false;
+  const center = points.reduce((sum, point) => ({ lat: sum.lat + point.lat, lon: sum.lon + point.lon }), { lat: 0, lon: 0 });
+  center.lat /= points.length;
+  center.lon /= points.length;
+  const nearest = points.reduce((best, point) => haversineMeters(point, center) < haversineMeters(best, center) ? point : best);
+  const candidate = await containingOsmParkResult(nearest, points);
+  if (!candidate?.boundary?.length) {
+    clearOsmBoundary();
+    return false;
+  }
+  setOsmBoundary(candidate.boundary, {
+    name: candidate.name, osmType: candidate.osmType, osmId: candidate.osmId,
+  });
+  elements.parkName.value = candidate.name;
+  updateFooter();
+  return true;
 }
 
 async function lookupParkName(force = false, suppliedPoints = null) {
@@ -676,13 +975,25 @@ async function lookupParkName(force = false, suppliedPoints = null) {
     if (!response.ok) throw new Error(`Lookup failed (${response.status}).`);
     const result = await response.json();
     if (requestId !== lookupRequestId) return;
-    let suggestedName = await nearbyParkName(nearest);
+    const nearbyPark = await containingOsmParkResult(nearest, points);
+    if (requestId !== lookupRequestId) return;
+    let suggestedName = nearbyPark?.name || "";
     if (!suggestedName) suggestedName = parkNameFromResult(result);
     if (!suggestedName) suggestedName = localityNameFromResult(result);
     if (!suggestedName) throw new Error("No named place was found near these coordinates.");
+    if (nearbyPark?.boundary?.length) {
+      setOsmBoundary(nearbyPark.boundary, {
+        name: nearbyPark.name, osmType: nearbyPark.osmType, osmId: nearbyPark.osmId,
+      });
+    } else {
+      clearOsmBoundary();
+    }
     elements.parkName.value = suggestedName;
     updateFooter();
-    elements.lookupNote.textContent = `Suggested from OpenStreetMap: ${suggestedName}. Edit it if needed.`;
+    elements.lookupNote.textContent = nearbyPark
+      ? `Containing OSM park: ${suggestedName}. Edit it if needed.`
+      : `No containing OSM park polygon found. Using locality: ${suggestedName}. No boundary will be shown.`;
+    elements.lookupNote.classList.toggle("error", !nearbyPark);
   } catch (error) {
     if (requestId === lookupRequestId) {
       elements.lookupNote.textContent = `${error.message} You can enter the park name manually.`;
@@ -704,7 +1015,7 @@ async function importCoordinateFile(file) {
   elements.importNote.classList.remove("error");
   elements.importNote.textContent = `Reading ${file.name}…`;
   try {
-    const imported = parseImportedFile(await file.text());
+    const imported = parseImportedFile(await readFileText(file));
     const filenameName = parkNameFromFilename(file.name);
     const importedName = imported.metadataName || filenameName;
     elements.coordinates.value = imported.points.map((point) => `${point.lat},${point.lon}`).join("\n");
@@ -722,8 +1033,8 @@ async function importCoordinateFile(file) {
         : `Name inferred from the file: ${importedName}.`;
     } else {
       elements.lookupNote.textContent = "Finding a name near the imported coordinates…";
-      lookupParkName(false, imported.points);
     }
+    lookupParkName(false, imported.points);
   } catch (error) {
     elements.importNote.textContent = error.message;
     elements.importNote.classList.add("error");
@@ -731,6 +1042,16 @@ async function importCoordinateFile(file) {
   } finally {
     elements.fileInput.value = "";
   }
+}
+
+function readFileText(file) {
+  if (typeof file.text === "function") return file.text();
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(String(reader.result || ""));
+    reader.onerror = () => reject(reader.error || new Error("The selected file could not be read."));
+    reader.readAsText(file);
+  });
 }
 
 function parkNameFromFilename(filename) {
@@ -809,11 +1130,11 @@ function worldPoint(point, zoom) {
   };
 }
 
-function exportView(route, width, height) {
+function exportView(route, width, height, additionalPoints = []) {
   const footerHeight = 104;
   const mapHeight = height - footerHeight;
   const padding = 42;
-  const base = route.map((point) => worldPoint(point, 0));
+  const base = [...route, ...additionalPoints].map((point) => worldPoint(point, 0));
   const minX = Math.min(...base.map((point) => point.x));
   const maxX = Math.max(...base.map((point) => point.x));
   const minY = Math.min(...base.map((point) => point.y));
@@ -887,8 +1208,82 @@ function drawPin(context, x, y, color = "#22bce7") {
   context.restore();
 }
 
+function drawBoundaryOnCanvas(context, view, left, top) {
+  if (!osmBoundaryPolygons.length) return;
+  context.save();
+  context.beginPath();
+  osmBoundaryPolygons.forEach((polygon) => polygon.forEach((ring) => {
+    ring.forEach((point, index) => {
+      const projected = worldPoint(point, view.zoom);
+      const x = projected.x - left;
+      const y = projected.y - top;
+      if (index) context.lineTo(x, y);
+      else context.moveTo(x, y);
+    });
+    context.closePath();
+  }));
+  context.fillStyle = "rgba(108,99,255,.09)";
+  context.fill("evenodd");
+  context.strokeStyle = "#5b52ff";
+  context.lineWidth = 4;
+  context.lineJoin = "round";
+  context.lineCap = "round";
+  context.stroke();
+  context.restore();
+}
+
+function drawDoubleChevron(context, x, y, angle) {
+  context.save();
+  context.translate(x, y);
+  context.rotate(angle);
+  context.beginPath();
+  [-4, 4].forEach((offset) => {
+    context.moveTo(offset - 3.5, -4);
+    context.lineTo(offset + 0.5, 0);
+    context.lineTo(offset - 3.5, 4);
+  });
+  context.strokeStyle = "rgba(255,255,255,.98)";
+  context.lineWidth = 2.2;
+  context.lineJoin = "round";
+  context.lineCap = "round";
+  context.stroke();
+  context.restore();
+}
+
+function drawRouteChevrons(context, points, spacing = 72) {
+  if (points.length < 2) return;
+  const loop = [...points, points[0]];
+  const segments = [];
+  let totalLength = 0;
+  for (let index = 1; index < loop.length; index += 1) {
+    const start = loop[index - 1];
+    const end = loop[index];
+    const length = Math.hypot(end.x - start.x, end.y - start.y);
+    if (length < 1) continue;
+    segments.push({ start, end, length, offset: totalLength });
+    totalLength += length;
+  }
+  for (let distance = Math.min(46, totalLength / 2); distance < totalLength - 18; distance += spacing) {
+    const segment = segments.find((item) => distance <= item.offset + item.length);
+    if (!segment) break;
+    const ratio = (distance - segment.offset) / segment.length;
+    drawDoubleChevron(context,
+      segment.start.x + (segment.end.x - segment.start.x) * ratio,
+      segment.start.y + (segment.end.y - segment.start.y) * ratio,
+      Math.atan2(segment.end.y - segment.start.y, segment.end.x - segment.start.x));
+  }
+}
+
 async function downloadMapImage() {
   if (!currentRoute.length) return;
+  if (!osmBoundaryPolygons.length) {
+    try {
+      showStatus("Checking for a containing OSM park boundary…");
+      await ensureOsmParkBoundary(currentRoute);
+    } catch (_) {
+      // Non-park routes intentionally export without a boundary.
+    }
+  }
   const name = elements.parkName.value.trim() || "Unnamed route";
   const width = 1200;
   const height = 800;
@@ -896,7 +1291,7 @@ async function downloadMapImage() {
   canvas.width = width;
   canvas.height = height;
   const context = canvas.getContext("2d");
-  const view = exportView(currentRoute, width, height);
+  const view = exportView(currentRoute, width, height, flattenBoundaryPoints());
   elements.imageButton.disabled = true;
   elements.imageButton.textContent = "Rendering…";
   showStatus("Rendering map image…");
@@ -911,6 +1306,8 @@ async function downloadMapImage() {
       return { x: projected.x - left, y: projected.y - top };
     });
 
+    drawBoundaryOnCanvas(context, view, left, top);
+
     if (canvasPoints.length > 1) {
       context.beginPath();
       [...canvasPoints, canvasPoints[0]].forEach((point, index) => index ? context.lineTo(point.x, point.y) : context.moveTo(point.x, point.y));
@@ -922,6 +1319,7 @@ async function downloadMapImage() {
       context.strokeStyle = "#f24a2e";
       context.lineWidth = 6;
       context.stroke();
+      drawRouteChevrons(context, canvasPoints);
     }
     canvasPoints.forEach((point, index) => drawPin(context, point.x, point.y,
       index === 0 ? "#25c46b" : index === canvasPoints.length - 1 ? "#ff4f91" : "#22bce7"));
@@ -973,6 +1371,11 @@ async function downloadMapImage() {
 }
 
 elements.buildButton.addEventListener("click", buildRoute);
+elements.editOsmBoundary.addEventListener("click", () => {
+  if (osmBoundaryEditMode) finishOsmBoundaryEditing();
+  else startOsmBoundaryEditing();
+});
+elements.resetOsmBoundary.addEventListener("click", resetOsmBoundary);
 elements.mapAddButton.addEventListener("click", () => {
   if (mapAddMode) {
     setMapAddMode(false);

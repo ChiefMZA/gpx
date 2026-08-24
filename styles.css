@@ -55,6 +55,10 @@ button { border-radius: 11px; font-weight: 800; }
 .actions[hidden] { display: none; }
 .actions .secondary:first-child { background: var(--lime); }
 .actions .secondary:last-child { background: var(--lavender); }
+.boundary-tools { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-top: 8px; }
+.boundary-tools[hidden] { display: none; }
+.boundary-tools .secondary { padding: 7px 8px; background: #d9d4ff; font-size: .68rem; }
+.boundary-tools #reset-osm-boundary { background: #fff0f6; }
 .status { display: flex; align-items: center; min-height: 1.2em; margin: 9px 0 0; color: #625b73; font-size: .72rem; }
 .status.error { color: #c52e68; }
 .status-dot { flex: 0 0 7px; width: 7px; height: 7px; margin-right: 7px; border: 1px solid #20202a; border-radius: 50%; background: var(--lime); box-shadow: none; }
@@ -70,6 +74,8 @@ button { border-radius: 11px; font-weight: 800; }
 .map-mode-hint[hidden] { display: none; }
 .remove-point-popup { display: grid; gap: 7px; min-width: 130px; color: #20202a; font: 700 .72rem/1.25 system-ui, sans-serif; }
 .remove-point-popup button { padding: 6px 8px; border: 2px solid #20202a; border-radius: 8px 8px 3px; color: #20202a; background: #ff9bc2; box-shadow: 2px 2px 0 #20202a; font-weight: 800; }
+.osm-boundary-handle { background: transparent; border: 0; }
+.osm-boundary-handle > span { display: block; width: 11px; height: 11px; border: 2px solid #fff; border-radius: 50%; background: #5b52ff; box-shadow: 0 0 0 2px #20202a, 0 2px 5px rgb(0 0 0 / 35%); }
 .empty-map { position: absolute; z-index: 500; inset: 0 0 96px; display: grid; place-items: center; color: #686574; background-color: #f7f2e8; background-image: radial-gradient(#c5b7ff 1.5px, transparent 1.5px); background-size: 24px 24px; text-align: center; }
 .empty-map[hidden] { display: none; }
 .empty-map > div { display: grid; gap: 8px; }

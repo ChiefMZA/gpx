@@ -6,11 +6,16 @@ A small browser-based GPX route tool. It:
 - imports `.gpx` and `.txt` files (including GPX XML saved with a `.txt` extension);
 - reads GPX waypoints, route points, track points, and the GPX metadata name;
 - removes duplicates and uses an exact/heuristic closed-loop route optimizer;
-- automatically suggests an editable `Park, City, Country` name using OpenStreetMap Nominatim;
+- identifies an enclosing OSM park polygon geometrically and suggests its editable name;
 - previews the route on an OpenStreetMap map;
 - lets you enter **Add/Edit Points** mode after a build, place extra markers directly on
   the map, remove markers, and automatically rebuild when you finish;
-- option to download a closed-loop GPX file and a tightly framed 1200 × 800 PNG map;
+- draws the exact enclosing OSM park boundary when one exists and lets you edit its vertices;
+- downloads a closed-loop GPX file and a tightly framed 1200 × 800 PNG map with the
+  existing pins/footer, the validated boundary, and repeated double-chevron direction markers;
+
+When uploaded coordinates are not covered by a mapped park-like OSM polygon, V2 uses a
+locality name and intentionally shows no boundary rather than drawing a nearby or guessed shape.
 
 After coordinates are imported, pasted, or edited, click **Build optimized route**.
 The GPX/PNG download buttons only appear for the currently built route and disappear
