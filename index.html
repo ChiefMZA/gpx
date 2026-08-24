@@ -4,20 +4,20 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>GPX Route Creator V2</title>
-  <meta name="description" content="Create optimized GPX routes from coordinates, preview them on a map, and download GPX or PNG files.">
+  <meta name="description" content="Create optimized GPX routes from coordinates, preview them on a map, and download GPX, TXT, or PNG files.">
   <meta name="theme-color" content="#6c63ff">
   <link rel="canonical" href="https://chiefmza.github.io/gpx/">
   <meta property="og:type" content="website">
   <meta property="og:url" content="https://chiefmza.github.io/gpx/">
   <meta property="og:title" content="GPX Route Creator V2">
-  <meta property="og:description" content="Create optimized GPX routes from coordinates, preview them on a map, and download GPX or PNG files.">
+  <meta property="og:description" content="Create optimized GPX routes from coordinates, preview them on a map, and download GPX, TXT, or PNG files.">
   <meta property="og:image" content="https://chiefmza.github.io/gpx/social-preview.png">
   <meta property="og:image:width" content="1200">
   <meta property="og:image:height" content="630">
   <meta property="og:image:alt" content="GPX Route Creator with an optimized route and colorful map pins">
   <meta name="twitter:card" content="summary_large_image">
   <meta name="twitter:title" content="GPX Route Creator V2">
-  <meta name="twitter:description" content="Create optimized GPX routes from coordinates, preview them on a map, and download GPX or PNG files.">
+  <meta name="twitter:description" content="Create optimized GPX routes from coordinates, preview them on a map, and download GPX, TXT, or PNG files.">
   <meta name="twitter:image" content="https://chiefmza.github.io/gpx/social-preview.png">
   <link rel="preconnect" href="https://unpkg.com">
   <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" crossorigin="">
@@ -61,6 +61,7 @@
 
       <div id="actions" class="actions" hidden>
         <button id="gpx-button" class="secondary" type="button">Download GPX</button>
+        <button id="txt-button" class="secondary" type="button">Download GPX as TXT</button>
         <button id="image-button" class="secondary" type="button">Download map PNG</button>
       </div>
       <p id="status" class="status" role="status"><span class="status-dot"></span><span id="status-text">Ready for coordinates.</span></p>
@@ -73,8 +74,8 @@
       <div id="empty-map" class="empty-map">
         <div>
           <span class="map-icon">⌖</span>
-          <strong>Your route will appear here</strong>
-          <span>Build a route to preview the points.</span>
+          <strong>Your points will appear here</strong>
+          <span>Add coordinates to preview their pins.</span>
         </div>
       </div>
       <footer id="map-footer" class="map-footer">

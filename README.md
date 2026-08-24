@@ -2,7 +2,7 @@
 
 A small browser-based GPX route tool. It:
 
-- accepts one `latitude,longitude` point per line;
+- accepts one `latitude,longitude` point per line and previews every valid point as a map pin before route building;
 - imports `.gpx` and `.txt` files (including GPX XML saved with a `.txt` extension);
 - reads GPX waypoints, route points, track points, and the GPX metadata name;
 - removes duplicates and uses an exact/heuristic closed-loop route optimizer;
@@ -11,7 +11,8 @@ A small browser-based GPX route tool. It:
 - lets you enter **Add/Edit Points** mode after a build, place extra markers directly on
   the map, remove markers, and automatically rebuild when you finish;
 - draws the exact enclosing OSM park boundary when one exists and lets you edit its vertices;
-- downloads a closed-loop GPX file and a tightly framed 1200 × 800 PNG map with the
+- writes every imported and exported latitude/longitude value with six decimal places;
+- downloads a closed-loop GPX file, the same GPX content as TXT, and a tightly framed 1200 × 800 PNG map with the
   existing pins/footer, the validated boundary, and repeated double-chevron direction markers;
 
 When uploaded coordinates are not covered by a mapped park-like OSM polygon, V2 uses a

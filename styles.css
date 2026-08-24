@@ -53,8 +53,9 @@ button { border-radius: 11px; font-weight: 800; }
 .import-button span { display: inline-block; margin-right: 3px; color: #20202a; font-size: .95rem; }
 .actions { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-top: 8px; }
 .actions[hidden] { display: none; }
-.actions .secondary:first-child { background: var(--lime); }
-.actions .secondary:last-child { background: var(--lavender); }
+.actions #gpx-button { background: var(--lime); }
+.actions #txt-button { background: var(--pink); }
+.actions #image-button { grid-column: 1 / -1; background: var(--lavender); }
 .boundary-tools { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-top: 8px; }
 .boundary-tools[hidden] { display: none; }
 .boundary-tools .secondary { padding: 7px 8px; background: #d9d4ff; font-size: .68rem; }
@@ -91,6 +92,9 @@ button { border-radius: 11px; font-weight: 800; }
 .footer-stats b { color: #fff; font-size: 1.12rem; }
 .footer-stats small { padding: 3px 9px; border: 2px solid #20202a; border-radius: 9px 9px 3px; color: #20202a; background: var(--lime); box-shadow: 3px 3px 0 #20202a; font-size: .72rem; font-weight: 900; }
 .route-marker { background: transparent; border: 0; }
+.input-marker { background: transparent; border: 0; }
+.input-pin { position: relative; width: 20px; height: 20px; border: 3px solid #fff; border-radius: 50% 50% 50% 0; background: #6c63ff; box-shadow: 0 2px 7px rgb(0 0 0 / 40%); transform: rotate(-45deg); }
+.input-pin::after { position: absolute; inset: 5px; content: ""; border-radius: 50%; background: #fff; }
 .route-pin { position: relative; width: 22px; height: 22px; border: 3px solid #fff; border-radius: 50% 50% 50% 0; background: #22bce7; box-shadow: 0 2px 7px rgb(0 0 0 / 45%); transform: rotate(-45deg); }
 .route-pin::after { position: absolute; inset: 5px; content: ""; border-radius: 50%; background: #fff; }
 .route-pin.start-pin { background: #25c46b; }
@@ -109,6 +113,7 @@ button { border-radius: 11px; font-weight: 800; }
   .label-row { align-items: flex-end; }
   .label-actions { gap: 9px; }
   .actions { grid-template-columns: 1fr; }
+  .actions #image-button { grid-column: auto; }
   .map-footer { height: 116px; align-items: flex-start; flex-direction: column; justify-content: center; gap: 7px; padding: 14px 20px; }
   .footer-stats { justify-items: start; }
   #map, .empty-map { bottom: 116px; }

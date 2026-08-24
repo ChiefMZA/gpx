@@ -23,6 +23,7 @@ const elements = {
   resetOsmBoundary: document.querySelector("#reset-osm-boundary"),
   buildButton: document.querySelector("#build-button"),
   gpxButton: document.querySelector("#gpx-button"),
+  txtButton: document.querySelector("#txt-button"),
   imageButton: document.querySelector("#image-button"),
   mapAddButton: document.querySelector("#map-add-button"),
   mapAddHint: document.querySelector("#map-add-hint"),
@@ -39,6 +40,8 @@ const elements = {
 let currentRoute = [];
 let routeLayer = null;
 let markerLayer = null;
+let inputMarkerLayer = null;
+let inputPreviewPoints = [];
 let lookupTimer = null;
 let lastLookupSignature = "";
 let lookupRequestId = 0;
@@ -593,8 +596,8 @@ function showStatus(message, error = false) {
 function getInputPoints() {
   try {
     const parsed = parseCoordinates(elements.coordinates.value);
+    elements.coordinates.value = parsed.points.map((point) => `${formatNumber(point.lat)},${formatNumber(point.lon)}`).join("\n");
     if (parsed.kind === "GPX") {
-      elements.coordinates.value = parsed.points.map((point) => `${point.lat},${point.lon}`).join("\n");
       if (!elements.parkName.value.trim() && parsed.metadataName) elements.parkName.value = parsed.metadataName;
       const duplicateText = parsed.duplicates ? ` ${parsed.duplicates} duplicate(s) removed.` : "";
       elements.importNote.textContent = `GPX extracted: ${parsed.points.length} coordinates.${duplicateText}`;
@@ -609,8 +612,10 @@ function getInputPoints() {
 
 function updateFooter() {
   elements.footerName.textContent = elements.parkName.value.trim() || "Unnamed route";
-  elements.footerPoints.textContent = String(currentRoute.length);
-  elements.footerDistance.textContent = (routeDistance(currentRoute) / 1000).toFixed(2);
+  elements.footerPoints.textContent = String(currentRoute.length || inputPreviewPoints.length);
+  elements.footerDistance.textContent = currentRoute.length
+    ? (routeDistance(currentRoute) / 1000).toFixed(2)
+    : inputPreviewPoints.length ? "—" : "0.00";
 }
 
 function setMapAddMode(active) {
@@ -727,17 +732,48 @@ function invalidateRoute(message = "") {
   clearOsmBoundary();
   if (routeLayer) routeLayer.remove();
   if (markerLayer) markerLayer.remove();
+  if (inputMarkerLayer) inputMarkerLayer.remove();
   routeLayer = null;
   markerLayer = null;
+  inputMarkerLayer = null;
+  inputPreviewPoints = [];
   elements.emptyMap.hidden = false;
   elements.footerLabel.textContent = "ROUTE READY";
   updateFooter();
   if (message && hadBuiltRoute) showStatus(message);
 }
 
+function drawInputPoints(points) {
+  if (inputMarkerLayer) inputMarkerLayer.remove();
+  inputPreviewPoints = [...points];
+  inputMarkerLayer = L.layerGroup().addTo(map);
+  const latLngs = points.map((point) => [point.lat, point.lon]);
+  points.forEach((point, index) => {
+    const icon = L.divIcon({
+      className: "input-marker",
+      html: '<div class="input-pin"></div>',
+      iconSize: [20, 27],
+      iconAnchor: [10, 25],
+    });
+    L.marker([point.lat, point.lon], { icon, bubblingMouseEvents: false })
+      .bindTooltip(`Input point ${index + 1}<br>${formatNumber(point.lat)}, ${formatNumber(point.lon)}`)
+      .addTo(inputMarkerLayer);
+  });
+  if (points.length === 1) map.setView(latLngs[0], 17);
+  else map.fitBounds(L.latLngBounds(latLngs), { padding: [45, 45], maxZoom: 17 });
+  elements.emptyMap.hidden = true;
+  elements.footerLabel.textContent = "POINTS LOADED";
+  elements.footerPoints.textContent = String(points.length);
+  elements.footerDistance.textContent = "—";
+  setTimeout(() => map.invalidateSize(), 0);
+}
+
 function drawRoute() {
   if (routeLayer) routeLayer.remove();
   if (markerLayer) markerLayer.remove();
+  if (inputMarkerLayer) inputMarkerLayer.remove();
+  inputMarkerLayer = null;
+  inputPreviewPoints = [];
 
   const latLngs = currentRoute.map((point) => [point.lat, point.lon]);
   const loopLatLngs = currentRoute.length > 1 ? [...latLngs, latLngs[0]] : latLngs;
@@ -752,7 +788,7 @@ function drawRoute() {
       iconAnchor: [11, 27],
     });
     const marker = L.marker([point.lat, point.lon], { icon, bubblingMouseEvents: false })
-      .bindTooltip(`${markerRole === "start" ? "Start" : markerRole === "finish" ? "Last point" : `Point ${index + 1}`}<br>${point.lat}, ${point.lon}${mapAddMode ? "<br>Click to remove" : ""}`);
+      .bindTooltip(`${markerRole === "start" ? "Start" : markerRole === "finish" ? "Last point" : `Point ${index + 1}`}<br>${formatNumber(point.lat)}, ${formatNumber(point.lon)}${mapAddMode ? "<br>Click to remove" : ""}`);
     marker.on("click", () => {
       if (mapAddMode) showRemovePointPopup(point);
     });
@@ -1016,15 +1052,20 @@ async function importCoordinateFile(file) {
   elements.importNote.textContent = `Reading ${file.name}…`;
   try {
     const imported = parseImportedFile(await readFileText(file));
+    const importedPoints = imported.points.map((point) => ({
+      lat: Number(formatNumber(point.lat)),
+      lon: Number(formatNumber(point.lon)),
+    }));
     const filenameName = parkNameFromFilename(file.name);
     const importedName = imported.metadataName || filenameName;
-    elements.coordinates.value = imported.points.map((point) => `${point.lat},${point.lon}`).join("\n");
+    elements.coordinates.value = importedPoints.map((point) => `${formatNumber(point.lat)},${formatNumber(point.lon)}`).join("\n");
     elements.parkName.value = importedName;
     lastLookupSignature = "";
     invalidateRoute();
+    drawInputPoints(importedPoints);
     updateFooter();
     const duplicateText = imported.duplicates ? ` ${imported.duplicates} duplicate(s) removed.` : "";
-    elements.importNote.textContent = `${imported.kind} imported: ${imported.points.length} coordinates.${duplicateText}`;
+    elements.importNote.textContent = `${imported.kind} imported: ${importedPoints.length} coordinates.${duplicateText}`;
     showStatus(`${file.name} is ready. Build the route.`);
     if (importedName) {
       elements.lookupNote.classList.remove("error");
@@ -1034,7 +1075,7 @@ async function importCoordinateFile(file) {
     } else {
       elements.lookupNote.textContent = "Finding a name near the imported coordinates…";
     }
-    lookupParkName(false, imported.points);
+    lookupParkName(false, importedPoints);
   } catch (error) {
     elements.importNote.textContent = error.message;
     elements.importNote.classList.add("error");
@@ -1085,7 +1126,7 @@ function safeFilename(value, extension) {
 }
 
 function formatNumber(value) {
-  return value.toFixed(8).replace(/0+$/, "").replace(/\.$/, "");
+  return Number(value).toFixed(6);
 }
 
 function createGpx(name, route) {
@@ -1119,6 +1160,13 @@ function downloadGpx() {
   const name = elements.parkName.value.trim() || "Unnamed route";
   downloadBlob(new Blob([createGpx(name, currentRoute)], { type: "application/gpx+xml" }), safeFilename(name, "gpx"));
   showStatus("GPX downloaded.");
+}
+
+function downloadTxt() {
+  if (!currentRoute.length) return;
+  const name = elements.parkName.value.trim() || "Unnamed route";
+  downloadBlob(new Blob([createGpx(name, currentRoute)], { type: "text/plain;charset=utf-8" }), safeFilename(name, "txt"));
+  showStatus("GPX content downloaded as TXT.");
 }
 
 function worldPoint(point, zoom) {
@@ -1392,6 +1440,7 @@ elements.fileInput.addEventListener("change", () => {
   if (file) importCoordinateFile(file);
 });
 elements.gpxButton.addEventListener("click", downloadGpx);
+elements.txtButton.addEventListener("click", downloadTxt);
 elements.imageButton.addEventListener("click", downloadMapImage);
 elements.parkName.addEventListener("input", updateFooter);
 elements.coordinates.addEventListener("input", () => {
@@ -1407,6 +1456,7 @@ elements.coordinates.addEventListener("input", () => {
   lookupTimer = setTimeout(() => {
     try {
       const { points } = parseCoordinates(elements.coordinates.value);
+      drawInputPoints(points);
       lookupParkName(false, points);
     } catch (_) {}
   }, 650);
