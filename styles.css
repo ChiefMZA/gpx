@@ -10,6 +10,9 @@
   --lime: #c9f75d;
   --lavender: #c5b7ff;
   --paper: #fffefb;
+  --route-pin: #22bce7;
+  --route-start-pin: #25c46b;
+  --route-finish-pin: #ff4f91;
 }
 * { box-sizing: border-box; }
 html, body { margin: 0; min-height: 100%; }
@@ -95,10 +98,10 @@ button { border-radius: 11px; font-weight: 800; }
 .input-marker { background: transparent; border: 0; }
 .input-pin { position: relative; width: 20px; height: 20px; border: 3px solid #fff; border-radius: 50% 50% 50% 0; background: #6c63ff; box-shadow: 0 2px 7px rgb(0 0 0 / 40%); transform: rotate(-45deg); }
 .input-pin::after { position: absolute; inset: 5px; content: ""; border-radius: 50%; background: #fff; }
-.route-pin { position: relative; width: 22px; height: 22px; border: 3px solid #fff; border-radius: 50% 50% 50% 0; background: #22bce7; box-shadow: 0 2px 7px rgb(0 0 0 / 45%); transform: rotate(-45deg); }
+.route-pin { position: relative; width: 22px; height: 22px; border: 3px solid #fff; border-radius: 50% 50% 50% 0; background: var(--route-pin); box-shadow: 0 2px 7px rgb(0 0 0 / 45%); transform: rotate(-45deg); }
 .route-pin::after { position: absolute; inset: 5px; content: ""; border-radius: 50%; background: #fff; }
-.route-pin.start-pin { background: #25c46b; }
-.route-pin.finish-pin { background: #ff4f91; }
+.route-pin.start-pin { background: var(--route-start-pin); }
+.route-pin.finish-pin { background: var(--route-finish-pin); }
 .leaflet-bar a { color: #15182d; }
 @media (max-width: 850px) {
   body { overflow: auto; }

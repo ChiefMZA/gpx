@@ -1237,15 +1237,29 @@ async function drawTiles(context, view, width) {
   await Promise.all(jobs);
 }
 
-function drawPin(context, x, y, color = "#22bce7") {
+function routePinColor(role) {
+  const variables = {
+    route: ["--route-pin", "#22bce7"],
+    start: ["--route-start-pin", "#25c46b"],
+    finish: ["--route-finish-pin", "#ff4f91"],
+  };
+  const [property, fallback] = variables[role] || variables.route;
+  return getComputedStyle(document.documentElement).getPropertyValue(property).trim() || fallback;
+}
+
+function drawPin(context, x, y, color = routePinColor("route")) {
   context.save();
   context.translate(x, y);
+  context.shadowColor = "rgb(0 0 0 / 45%)";
+  context.shadowBlur = 7;
+  context.shadowOffsetY = 2;
   context.beginPath();
   context.arc(0, -10, 10, Math.PI * 0.12, Math.PI * 0.88, true);
   context.lineTo(0, 8);
   context.closePath();
   context.fillStyle = color;
   context.fill();
+  context.shadowColor = "transparent";
   context.lineWidth = 3;
   context.strokeStyle = "#ffffff";
   context.stroke();
@@ -1370,7 +1384,7 @@ async function downloadMapImage() {
       drawRouteChevrons(context, canvasPoints);
     }
     canvasPoints.forEach((point, index) => drawPin(context, point.x, point.y,
-      index === 0 ? "#25c46b" : index === canvasPoints.length - 1 ? "#ff4f91" : "#22bce7"));
+      routePinColor(index === 0 ? "start" : index === canvasPoints.length - 1 ? "finish" : "route")));
 
     context.fillStyle = "#14212b";
     context.fillRect(0, view.mapHeight, width, height - view.mapHeight);
