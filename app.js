@@ -1028,7 +1028,7 @@ async function lookupParkName(force = false, suppliedPoints = null) {
     updateFooter();
     elements.lookupNote.textContent = nearbyPark
       ? `Containing OSM park: ${suggestedName}. Edit it if needed.`
-      : `No containing OSM park polygon found. Using locality: ${suggestedName}. No boundary will be shown.`;
+      : `Suggested name: ${suggestedName}. Edit it if needed.`;
     elements.lookupNote.classList.toggle("error", !nearbyPark);
   } catch (error) {
     if (requestId === lookupRequestId) {
