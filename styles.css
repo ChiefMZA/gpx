@@ -59,6 +59,9 @@ button { border-radius: 11px; font-weight: 800; }
 .actions #gpx-button { background: var(--lime); }
 .actions #txt-button { background: var(--pink); }
 .actions #image-button { grid-column: 1 / -1; background: var(--lavender); }
+.png-options { grid-column: 1 / -1; display: flex; flex-wrap: wrap; gap: 7px 14px; padding: 7px 9px; border: 1px solid #cbc4dc; border-radius: 9px; background: #fffefb; }
+.png-options label { display: inline-flex; align-items: center; gap: 6px; color: #514a62; font: 700 .68rem/1.2 system-ui, sans-serif; cursor: pointer; }
+.png-options input { width: 15px; height: 15px; min-width: 15px; margin: 0; padding: 0; border: 0; border-radius: 3px; box-shadow: none; accent-color: var(--purple); cursor: pointer; }
 .boundary-tools { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-top: 8px; }
 .boundary-tools[hidden] { display: none; }
 .boundary-tools .secondary { padding: 7px 8px; background: #d9d4ff; font-size: .68rem; }
@@ -67,6 +70,12 @@ button { border-radius: 11px; font-weight: 800; }
 .status.error { color: #c52e68; }
 .status-dot { flex: 0 0 7px; width: 7px; height: 7px; margin-right: 7px; border: 1px solid #20202a; border-radius: 50%; background: var(--lime); box-shadow: none; }
 .status.error .status-dot { background: #ff6679; box-shadow: 0 0 9px #ff6679; }
+.optimization-progress { margin-top: 8px; padding: 9px 10px; border: 1px solid #cbc4dc; border-radius: 9px; background: #fffefb; }
+.optimization-progress[hidden] { display: none; }
+.optimization-progress-label { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-bottom: 6px; color: #514a62; font-size: .7rem; }
+.optimization-progress-label strong { min-width: 3ch; color: #20202a; text-align: right; }
+.optimization-track { height: 8px; overflow: hidden; border: 1px solid #20202a; border-radius: 999px; background: #e8e3f0; }
+.optimization-track span { display: block; width: 0; height: 100%; border-radius: inherit; background: linear-gradient(90deg, var(--route-pin), var(--lime)); transition: width .18s ease-out; }
 .map-panel { position: relative; min-height: 100dvh; overflow: hidden; background: #f7f2e8; }
 #map { position: absolute; inset: 0 0 96px; }
 .map-add-button { position: absolute; z-index: 650; top: 14px; right: 14px; padding: 9px 13px; border: 2px solid #20202a; border-radius: 11px 11px 4px; color: #20202a; background: var(--pink); box-shadow: 4px 4px 0 #20202a; font-size: .78rem; }
@@ -102,6 +111,11 @@ button { border-radius: 11px; font-weight: 800; }
 .route-pin::after { position: absolute; inset: 5px; content: ""; border-radius: 50%; background: #fff; }
 .route-pin.start-pin { background: var(--route-start-pin); }
 .route-pin.finish-pin { background: var(--route-finish-pin); }
+.compact-map-pin { position: relative; width: 10px; height: 10px; border: 1.5px solid #fff; border-radius: 50% 50% 50% 0; background: var(--route-pin); box-shadow: 0 1px 2px rgb(0 0 0 / 38%); transform: rotate(-45deg); }
+.compact-map-pin::after { position: absolute; inset: 2.5px; content: ""; border-radius: 50%; background: #fff; }
+.compact-map-pin.input { background: var(--purple); }
+.compact-map-pin.start { width: 12px; height: 12px; background: var(--route-start-pin); }
+.compact-map-pin.finish { width: 12px; height: 12px; background: var(--route-finish-pin); }
 .leaflet-bar a { color: #15182d; }
 @media (max-width: 850px) {
   body { overflow: auto; }

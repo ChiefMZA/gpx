@@ -46,12 +46,12 @@
       <textarea id="coordinates" rows="12" spellcheck="false" placeholder="35.6285, 139.6228&#10;35.6291, 139.6242&#10;35.6278, 139.6250"></textarea>
       <p id="import-note" class="hint">Paste <code>lat,lon</code> lines or import a GPX/TXT file.</p>
 
-      <label class="park-label" for="park-name">Park name</label>
+      <label class="park-label" for="park-name">Place name</label>
       <div class="field-row">
         <input id="park-name" type="text" placeholder="Auto-detected after coordinates are added" autocomplete="off">
-        <button id="lookup-button" class="secondary icon-button" type="button" title="Find park name again">↻</button>
+        <button id="lookup-button" class="secondary icon-button" type="button" title="Find place name again">↻</button>
       </div>
-      <p id="lookup-note" class="hint">The suggested name stays editable.</p>
+      <p id="lookup-note" class="hint">Parks preferred; gardens, malls, plazas, and other gathering places supported. The name stays editable.</p>
       <div id="boundary-tools" class="boundary-tools" hidden>
         <button id="edit-osm-boundary" class="secondary" type="button">Edit OSM boundary</button>
         <button id="reset-osm-boundary" class="secondary" type="button" hidden>Reset OSM boundary</button>
@@ -63,8 +63,18 @@
         <button id="gpx-button" class="secondary" type="button">Download GPX</button>
         <button id="txt-button" class="secondary" type="button">Download GPX as TXT</button>
         <button id="image-button" class="secondary" type="button">Download map PNG</button>
+        <div class="png-options" aria-label="PNG image options">
+          <label><input id="png-show-boundary" type="checkbox" checked> Show OSM boundary</label>
+          <label><input id="png-show-pins" type="checkbox" checked> Show route pins</label>
+        </div>
       </div>
       <p id="status" class="status" role="status"><span class="status-dot"></span><span id="status-text">Ready for coordinates.</span></p>
+      <div id="optimization-progress" class="optimization-progress" hidden>
+        <div class="optimization-progress-label"><span id="optimization-stage">Preparing route…</span><strong id="optimization-percent">0%</strong></div>
+        <div id="optimization-track" class="optimization-track" role="progressbar" aria-label="Route optimization progress" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0">
+          <span id="optimization-fill"></span>
+        </div>
+      </div>
     </section>
 
     <section class="map-panel" aria-label="Route preview">

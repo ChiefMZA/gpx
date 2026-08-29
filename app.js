@@ -3,6 +3,12 @@
 const TILE_URL = "https://tile.openstreetmap.org/{z}/{x}/{y}.png";
 const EARTH_RADIUS_METERS = 6371008.8;
 const EXACT_OPTIMIZATION_LIMIT = 14;
+const FULL_HEURISTIC_START_LIMIT = 160;
+const LARGE_ROUTE_SEED_LIMIT = 64;
+const LARGE_ROUTE_CANDIDATE_LIMIT = 16;
+const LARGE_ROUTE_TWO_OPT_PASSES = 12;
+const LARGE_ROUTE_RELOCATION_LIMIT = 32;
+const DOM_MARKER_LIMIT = 300;
 const OVERPASS_ENDPOINTS = [
   "https://overpass-api.de/api/interpreter",
   "https://overpass.kumi.systems/api/interpreter",
@@ -25,11 +31,18 @@ const elements = {
   gpxButton: document.querySelector("#gpx-button"),
   txtButton: document.querySelector("#txt-button"),
   imageButton: document.querySelector("#image-button"),
+  pngShowBoundary: document.querySelector("#png-show-boundary"),
+  pngShowPins: document.querySelector("#png-show-pins"),
   mapAddButton: document.querySelector("#map-add-button"),
   mapAddHint: document.querySelector("#map-add-hint"),
   actions: document.querySelector("#actions"),
   status: document.querySelector("#status"),
   statusText: document.querySelector("#status-text"),
+  optimizationProgress: document.querySelector("#optimization-progress"),
+  optimizationStage: document.querySelector("#optimization-stage"),
+  optimizationPercent: document.querySelector("#optimization-percent"),
+  optimizationTrack: document.querySelector("#optimization-track"),
+  optimizationFill: document.querySelector("#optimization-fill"),
   emptyMap: document.querySelector("#empty-map"),
   footerName: document.querySelector("#footer-name"),
   footerLabel: document.querySelector("#footer-label"),
@@ -54,9 +67,10 @@ let osmBoundaryHandleLayer = null;
 let osmBoundaryEditMode = false;
 let osmBoundaryEdited = false;
 let osmBoundaryMetadata = null;
+let optimizationProgressTimer = null;
 const containingParkCache = new Map();
 
-const map = L.map("map", { zoomControl: false, attributionControl: true }).setView([20, 0], 2);
+const map = L.map("map", { zoomControl: false, attributionControl: true, preferCanvas: true }).setView([20, 0], 2);
 L.control.zoom({ position: "bottomleft" }).addTo(map);
 L.tileLayer(TILE_URL, {
   maxZoom: 19,
@@ -324,7 +338,55 @@ function routeDistance(route) {
 }
 
 function distanceMatrix(points) {
-  return points.map((a) => points.map((b) => haversineMeters(a, b)));
+  const distances = Array.from({ length: points.length }, () => new Float64Array(points.length));
+  for (let first = 0; first < points.length; first += 1) {
+    for (let second = first + 1; second < points.length; second += 1) {
+      const distance = haversineMeters(points[first], points[second]);
+      distances[first][second] = distance;
+      distances[second][first] = distance;
+    }
+  }
+  return distances;
+}
+
+function heuristicStartIndexes(distances) {
+  const count = distances.length;
+  if (count <= FULL_HEURISTIC_START_LIMIT) return Array.from({ length: count }, (_, index) => index);
+  const starts = [];
+  const orderedSeedCount = Math.floor(LARGE_ROUTE_SEED_LIMIT / 2);
+  for (let seed = 0; seed < orderedSeedCount; seed += 1) {
+    const index = Math.floor(seed * count / orderedSeedCount);
+    if (!starts.includes(index)) starts.push(index);
+  }
+  const nearestStartDistance = new Float64Array(count);
+  nearestStartDistance.fill(Infinity);
+  starts.forEach((start) => {
+    for (let index = 0; index < count; index += 1) {
+      if (distances[start][index] < nearestStartDistance[index]) nearestStartDistance[index] = distances[start][index];
+    }
+  });
+  while (starts.length < Math.min(count, LARGE_ROUTE_SEED_LIMIT)) {
+    let farthest = -1;
+    for (let index = 0; index < count; index += 1) {
+      if (!starts.includes(index) && (farthest < 0 || nearestStartDistance[index] > nearestStartDistance[farthest])) farthest = index;
+    }
+    if (farthest < 0) break;
+    starts.push(farthest);
+    for (let index = 0; index < count; index += 1) {
+      if (distances[farthest][index] < nearestStartDistance[index]) nearestStartDistance[index] = distances[farthest][index];
+    }
+  }
+  return starts;
+}
+
+function perturbClosedRoute(route, variant) {
+  const shift = Math.floor((variant + 1) * route.length / 17) % route.length;
+  const rotated = route.slice(shift).concat(route.slice(0, shift));
+  const quarter = Math.max(1, Math.floor(rotated.length / 4));
+  return rotated.slice(0, quarter)
+    .concat(rotated.slice(quarter * 2, quarter * 3))
+    .concat(rotated.slice(quarter, quarter * 2))
+    .concat(rotated.slice(quarter * 3));
 }
 
 function routeDistanceIndexes(route, distances) {
@@ -491,7 +553,10 @@ function cheapestInsertion(distances, startIndex, farthestFirst) {
 function improveTwoOpt(route, distances) {
   let anyChange = false;
   let improved = true;
-  while (improved) {
+  let passes = 0;
+  const maxPasses = route.length > FULL_HEURISTIC_START_LIMIT ? LARGE_ROUTE_TWO_OPT_PASSES : Infinity;
+  while (improved && passes < maxPasses) {
+    passes += 1;
     improved = false;
     for (let first = 1; first < route.length - 1; first += 1) {
       for (let last = first; last < route.length; last += 1) {
@@ -500,7 +565,9 @@ function improveTwoOpt(route, distances) {
         const oldDistance = distances[previous][route[first]] + distances[route[last]][next];
         const newDistance = distances[previous][route[last]] + distances[route[first]][next];
         if (newDistance + 0.000001 < oldDistance) {
-          route.splice(first, last - first + 1, ...route.slice(first, last + 1).reverse());
+          for (let left = first, right = last; left < right; left += 1, right -= 1) {
+            [route[left], route[right]] = [route[right], route[left]];
+          }
           improved = true;
           anyChange = true;
         }
@@ -512,7 +579,9 @@ function improveTwoOpt(route, distances) {
 
 function relocatePoints(route, distances) {
   let anyChange = false;
-  while (true) {
+  let moves = 0;
+  const maxMoves = route.length > FULL_HEURISTIC_START_LIMIT ? LARGE_ROUTE_RELOCATION_LIMIT : Infinity;
+  while (moves < maxMoves) {
     let bestDelta = 0;
     let bestMove = null;
     for (let index = 1; index < route.length; index += 1) {
@@ -538,38 +607,56 @@ function relocatePoints(route, distances) {
     const [point] = route.splice(bestMove.index, 1);
     route.splice(bestMove.slot, 0, point);
     anyChange = true;
+    moves += 1;
   }
+  return anyChange;
 }
 
 function improveRoute(candidate, distances) {
   const route = [...candidate];
-  while (true) {
+  const maxRounds = route.length > FULL_HEURISTIC_START_LIMIT ? 2 : Infinity;
+  for (let round = 0; round < maxRounds; round += 1) {
     improveTwoOpt(route, distances);
     if (!relocatePoints(route, distances)) return route;
   }
+  return route;
 }
 
-function bestHeuristicClosedRoute(distances) {
-  const nearest = distances.map((_, start) => nearestNeighbor(distances, start));
+function bestHeuristicClosedRoute(distances, reportProgress = null) {
+  const startIndexes = heuristicStartIndexes(distances);
+  const nearest = [];
+  startIndexes.forEach((start, index) => {
+    nearest.push(nearestNeighbor(distances, start));
+    if (reportProgress) reportProgress(18 + Math.round((index + 1) / startIndexes.length * 22), "Comparing starting points…");
+  });
   nearest.sort((a, b) => routeDistanceIndexes(a, distances) - routeDistanceIndexes(b, distances));
-  const candidates = nearest.slice(0, Math.min(24, nearest.length));
+  const largeRoute = distances.length > FULL_HEURISTIC_START_LIMIT;
+  const candidates = nearest.slice(0, Math.min(largeRoute ? LARGE_ROUTE_CANDIDATE_LIMIT : 24, nearest.length));
   const starts = [];
   candidates.slice(0, 8).forEach((route) => {
     [route[0], route[route.length - 1]].forEach((point) => {
       if (!starts.includes(point)) starts.push(point);
     });
   });
-  starts.forEach((start) => {
-    candidates.push(cheapestInsertion(distances, start, false));
-    candidates.push(cheapestInsertion(distances, start, true));
+  if (!largeRoute) starts.forEach((start) => {
+      candidates.push(cheapestInsertion(distances, start, false));
+      candidates.push(cheapestInsertion(distances, start, true));
+    });
+  else candidates.slice(0, 4).forEach((route, routeIndex) => {
+    candidates.push(perturbClosedRoute(route, routeIndex * 2));
+    candidates.push(perturbClosedRoute(route, routeIndex * 2 + 1));
   });
-  const improved = candidates.map((route) => improveRoute(route, distances));
+  const improved = candidates.map((route, index) => {
+    const result = improveRoute(route, distances);
+    if (reportProgress) reportProgress(42 + Math.round((index + 1) / candidates.length * 48), "Shortening the route…");
+    return result;
+  });
   return improved.reduce((best, route) => routeDistanceIndexes(route, distances) < routeDistanceIndexes(best, distances) ? route : best);
 }
 
 function preferredOpenRoute(distances) {
   if (distances.length <= EXACT_OPTIMIZATION_LIMIT) return exactOpenRoute(distances);
-  return distances.map((_, start) => nearestNeighbor(distances, start))
+  return heuristicStartIndexes(distances).map((start) => nearestNeighbor(distances, start))
     .reduce((best, route) => openRouteDistanceIndexes(route, distances) < openRouteDistanceIndexes(best, distances) ? route : best);
 }
 
@@ -586,6 +673,87 @@ function optimizeRoute(points) {
   const selected = distances[forward[1]][openGuide[1]] <= distances[reverse[1]][openGuide[1]]
     ? forward : reverse;
   return selected.map((index) => points[index]);
+}
+
+function optimizeRouteAsync(points, reportProgress = null) {
+  if (points.length <= FULL_HEURISTIC_START_LIMIT || typeof Worker === "undefined") {
+    return Promise.resolve(optimizeRoute(points));
+  }
+  const workerSource = `
+    "use strict";
+    const EARTH_RADIUS_METERS = ${EARTH_RADIUS_METERS};
+    const FULL_HEURISTIC_START_LIMIT = ${FULL_HEURISTIC_START_LIMIT};
+    const LARGE_ROUTE_SEED_LIMIT = ${LARGE_ROUTE_SEED_LIMIT};
+    const LARGE_ROUTE_CANDIDATE_LIMIT = ${LARGE_ROUTE_CANDIDATE_LIMIT};
+    const LARGE_ROUTE_TWO_OPT_PASSES = ${LARGE_ROUTE_TWO_OPT_PASSES};
+    const LARGE_ROUTE_RELOCATION_LIMIT = ${LARGE_ROUTE_RELOCATION_LIMIT};
+    ${haversineMeters.toString()}
+    ${distanceMatrix.toString()}
+    ${heuristicStartIndexes.toString()}
+    ${perturbClosedRoute.toString()}
+    ${routeDistanceIndexes.toString()}
+    ${openRouteDistanceIndexes.toString()}
+    ${nearestNeighbor.toString()}
+    ${improveTwoOpt.toString()}
+    ${relocatePoints.toString()}
+    ${improveRoute.toString()}
+    ${bestHeuristicClosedRoute.toString()}
+    self.onmessage = ({ data: points }) => {
+      try {
+        self.postMessage({ type: "progress", percent: 8, stage: "Measuring distances…" });
+        const distances = distanceMatrix(points);
+        self.postMessage({ type: "progress", percent: 18, stage: "Comparing starting points…" });
+        const indexes = bestHeuristicClosedRoute(distances, (percent, stage) => self.postMessage({ type: "progress", percent, stage }));
+        self.postMessage({ type: "progress", percent: 93, stage: "Choosing the best route…" });
+        const openGuide = heuristicStartIndexes(distances).map((start) => nearestNeighbor(distances, start))
+          .reduce((best, route) => openRouteDistanceIndexes(route, distances) < openRouteDistanceIndexes(best, distances) ? route : best);
+        self.postMessage({ type: "progress", percent: 98, stage: "Finalizing the route…" });
+        const anchor = indexes.indexOf(openGuide[0]);
+        const forward = indexes.slice(anchor).concat(indexes.slice(0, anchor));
+        const reverse = [forward[0], ...forward.slice(1).reverse()];
+        self.postMessage({ type: "result", indexes: distances[forward[1]][openGuide[1]] <= distances[reverse[1]][openGuide[1]] ? forward : reverse });
+      } catch (error) {
+        self.postMessage({ error: error.message || String(error) });
+      }
+    };
+  `;
+  const workerUrl = URL.createObjectURL(new Blob([workerSource], { type: "text/javascript" }));
+  return new Promise((resolve, reject) => {
+    const worker = new Worker(workerUrl);
+    const cleanup = () => {
+      worker.terminate();
+      URL.revokeObjectURL(workerUrl);
+    };
+    worker.onmessage = ({ data }) => {
+      if (data?.type === "progress") {
+        if (reportProgress) reportProgress(data.percent, data.stage);
+        return;
+      }
+      cleanup();
+      if (data?.error) reject(new Error(data.error));
+      else resolve(data.indexes.map((index) => points[index]));
+    };
+    worker.onerror = (event) => {
+      cleanup();
+      reject(new Error(event.message || "Route optimization worker failed."));
+    };
+    worker.postMessage(points);
+  });
+}
+
+function showOptimizationProgress(percent, stage) {
+  clearTimeout(optimizationProgressTimer);
+  const value = Math.max(0, Math.min(100, Math.round(percent)));
+  elements.optimizationProgress.hidden = false;
+  elements.optimizationStage.textContent = stage;
+  elements.optimizationPercent.textContent = `${value}%`;
+  elements.optimizationFill.style.width = `${value}%`;
+  elements.optimizationTrack.setAttribute("aria-valuenow", String(value));
+}
+
+function finishOptimizationProgress(stage = "Route ready") {
+  showOptimizationProgress(100, stage);
+  optimizationProgressTimer = setTimeout(() => { elements.optimizationProgress.hidden = true; }, 1400);
 }
 
 function showStatus(message, error = false) {
@@ -748,7 +916,15 @@ function drawInputPoints(points) {
   inputPreviewPoints = [...points];
   inputMarkerLayer = L.layerGroup().addTo(map);
   const latLngs = points.map((point) => [point.lat, point.lon]);
+  const lightweightMarkers = points.length > DOM_MARKER_LIMIT;
   points.forEach((point, index) => {
+    if (lightweightMarkers) {
+      const icon = L.divIcon({ className: "input-marker", html: '<div class="compact-map-pin input"></div>', iconSize: [10, 14], iconAnchor: [5, 13] });
+      L.marker([point.lat, point.lon], { icon, bubblingMouseEvents: false })
+        .bindTooltip(`Input point ${index + 1}<br>${formatNumber(point.lat)}, ${formatNumber(point.lon)}`)
+        .addTo(inputMarkerLayer);
+      return;
+    }
     const icon = L.divIcon({
       className: "input-marker",
       html: '<div class="input-pin"></div>',
@@ -779,8 +955,18 @@ function drawRoute() {
   const loopLatLngs = currentRoute.length > 1 ? [...latLngs, latLngs[0]] : latLngs;
   routeLayer = L.polyline(loopLatLngs, { color: "#f24a2e", weight: 5, opacity: 0.95 }).addTo(map);
   markerLayer = L.layerGroup().addTo(map);
+  const lightweightMarkers = currentRoute.length > DOM_MARKER_LIMIT;
   currentRoute.forEach((point, index) => {
     const markerRole = index === 0 ? "start" : index === currentRoute.length - 1 ? "finish" : "route";
+    if (lightweightMarkers) {
+      const compactRole = markerRole === "route" ? "" : ` ${markerRole}`;
+      const icon = L.divIcon({ className: "route-marker", html: `<div class="compact-map-pin${compactRole}"></div>`, iconSize: [12, 16], iconAnchor: [6, 15] });
+      const marker = L.marker([point.lat, point.lon], { icon, bubblingMouseEvents: false })
+        .bindTooltip(`${markerRole === "start" ? "Start" : markerRole === "finish" ? "Last point" : `Point ${index + 1}`}<br>${formatNumber(point.lat)}, ${formatNumber(point.lon)}${mapAddMode ? "<br>Click to remove" : ""}`);
+      marker.on("click", () => { if (mapAddMode) showRemovePointPopup(point); });
+      marker.addTo(markerLayer);
+      return;
+    }
     const icon = L.divIcon({
       className: "route-marker",
       html: `<div class="route-pin ${markerRole}-pin"></div>`,
@@ -805,14 +991,23 @@ function drawRoute() {
   setTimeout(() => map.invalidateSize(), 0);
 }
 
-function buildRoute() {
+async function buildRoute() {
   let parsed;
   try {
     parsed = getInputPoints();
   } catch (_) {
     return;
   }
-  currentRoute = optimizeRoute(parsed.points);
+  elements.buildButton.disabled = true;
+  showStatus(`Optimizing ${parsed.points.length} points…`);
+  showOptimizationProgress(2, "Preparing the points…");
+  await new Promise((resolve) => requestAnimationFrame(() => setTimeout(resolve, 0)));
+  try {
+    currentRoute = await optimizeRouteAsync(parsed.points, showOptimizationProgress);
+  } catch (_) {
+    showOptimizationProgress(25, "Continuing route optimization…");
+    currentRoute = optimizeRoute(parsed.points);
+  }
   clearPendingMapPoints();
   drawRoute();
   updateFooter();
@@ -822,17 +1017,57 @@ function buildRoute() {
   setMapAddMode(false);
   const duplicateText = parsed.duplicates ? ` ${parsed.duplicates} duplicate(s) removed.` : "";
   showStatus(`Route ready: ${currentRoute.length} points, ${(routeDistance(currentRoute) / 1000).toFixed(2)} km.${duplicateText}`);
+  finishOptimizationProgress();
+  elements.buildButton.disabled = false;
+}
+
+// Keep detection scoped to mapped gathering venues, not arbitrary buildings or city boundaries.
+const PLACE_TAG_GROUPS = [
+  { key: "leisure", values: ["park"], priority: 0 },
+  { key: "leisure", values: ["garden"], priority: 1 },
+  { key: "leisure", values: ["recreation_ground", "nature_reserve", "common"], priority: 2 },
+  { key: "boundary", values: ["protected_area", "national_park"], priority: 2 },
+  { key: "landuse", values: ["recreation_ground", "village_green"], priority: 2 },
+  { key: "shop", values: ["mall", "shopping_centre", "department_store"], priority: 3 },
+  { key: "building", values: ["mall"], priority: 3 },
+  { key: "place", values: ["square"], priority: 3 },
+  { key: "highway", values: ["pedestrian"], priority: 3 },
+  { key: "amenity", values: ["marketplace", "community_centre", "events_venue", "arts_centre", "theatre", "conference_centre", "exhibition_centre", "place_of_worship"], priority: 3 },
+  { key: "tourism", values: ["attraction", "theme_park", "zoo", "museum", "aquarium", "gallery", "picnic_site"], priority: 3 },
+  { key: "leisure", values: ["stadium", "sports_centre", "playground", "water_park", "resort"], priority: 3 },
+  { key: "natural", values: ["beach"], priority: 3 },
+];
+
+function placePriority(result) {
+  const category = result.category || result.class;
+  return PLACE_TAG_GROUPS.reduce((priority, group) => {
+    const matches = (category === group.key && group.values.includes(result.type))
+      || group.values.includes(result.extratags?.[group.key]);
+    return matches ? Math.min(priority, group.priority) : priority;
+  }, 99);
+}
+
+function placeBaseName(result) {
+  const address = result.address || {};
+  // An object's own name must take precedence over a parent park in its address.
+  if (placePriority(result) < 99) {
+    return result.name || result.namedetails?.name || result.namedetails?.["name:en"]
+      || address[result.type] || "";
+  }
+  return [address.park, address.garden, address.nature_reserve, address.recreation_ground,
+    address.mall, address.shopping_centre, address.square, address.marketplace].find(Boolean) || "";
+}
+
+function comparePlaceCandidates(a, b) {
+  // Geometry wins first. Prefer parks only among equally well-covered places.
+  return b.coverage - a.coverage || Number(b.contains) - Number(a.contains)
+    || a.priority - b.priority || b.importance - a.importance
+    || (a.distance || 0) - (b.distance || 0);
 }
 
 function parkNameFromResult(result) {
   const address = result.address || {};
-  const parkTypes = ["park", "garden", "nature_reserve", "recreation_ground", "common"];
-  const isParkFeature = [result.type, result.addresstype].some((value) => parkTypes.includes(value))
-    || ["leisure", "natural"].includes(result.category);
-  const parkName = [
-    address.park, address.nature_reserve, address.garden, address.recreation_ground,
-    address.leisure, isParkFeature ? result.name : "", isParkFeature ? result.namedetails?.name : "",
-  ].find(Boolean);
+  const parkName = placeBaseName(result);
   if (!parkName) return "";
 
   const state = address.state || address.province || address.region || "";
@@ -871,13 +1106,9 @@ function sampledContainmentPoints(points) {
 function overpassParkQuery(points) {
   const samples = sampledContainmentPoints(points);
   const assignments = samples.map((point, index) => `is_in(${point.lat},${point.lon})->.inside${index};`).join("\n");
-  const selectors = samples.flatMap((_, index) => [
-    `area.inside${index}[name][leisure=park];`,
-    `area.inside${index}[name][leisure=garden];`,
-    `area.inside${index}[name][leisure=recreation_ground];`,
-    `area.inside${index}[name][leisure=nature_reserve];`,
-    `area.inside${index}[name][boundary=protected_area];`,
-  ]).join("\n");
+  const selectors = samples.flatMap((_, index) => PLACE_TAG_GROUPS.map(({ key, values }) =>
+    `area.inside${index}[name][${key}~"^(${values.join("|")})$"];`
+  )).join("\n");
   return `[out:json][timeout:25];\n${assignments}\n(\n${selectors}\n);\nout tags center;`;
 }
 
@@ -911,8 +1142,8 @@ async function overpassContainingParkIds(points) {
 }
 
 async function containingOsmParkResult(point, routePoints = [point]) {
-  const cacheKey = sampledContainmentPoints(routePoints)
-    .map((sample) => `${sample.lat.toFixed(5)},${sample.lon.toFixed(5)}`).join(";");
+  const cacheKey = `${point.lat},${point.lon}|` + routePoints
+    .map((sample) => `${sample.lat},${sample.lon}`).join(";");
   if (containingParkCache.has(cacheKey)) return containingParkCache.get(cacheKey);
   const osmIds = await overpassContainingParkIds(routePoints);
   if (osmIds === null) return null;
@@ -923,7 +1154,7 @@ async function containingOsmParkResult(point, routePoints = [point]) {
   await new Promise((resolve) => setTimeout(resolve, 1050));
   const url = new URL("https://nominatim.openstreetmap.org/lookup");
   url.search = new URLSearchParams({
-    format: "jsonv2", osm_ids: osmIds.join(","), addressdetails: "1", namedetails: "1",
+    format: "jsonv2", osm_ids: osmIds.join(","), addressdetails: "1", namedetails: "1", extratags: "1",
     polygon_geojson: "1", polygon_threshold: "0", "accept-language": "en",
   });
   try {
@@ -935,16 +1166,15 @@ async function containingOsmParkResult(point, routePoints = [point]) {
       const coveredPoints = boundary.length
         ? routePoints.filter((routePoint) => pointInsideBoundary(routePoint, boundary)).length : 0;
       return {
-        name: parkNameFromResult(result), boundary,
+        priority: placePriority(result), name: parkNameFromResult(result), boundary,
         contains: boundary.length ? pointInsideBoundary(point, boundary) : false,
         coverage: routePoints.length ? coveredPoints / routePoints.length : 0,
         importance: Number(result.importance) || 0,
         osmType: result.osm_type || "", osmId: result.osm_id || "",
       };
-    }).filter((candidate) => candidate.name && candidate.boundary.length
+    }).filter((candidate) => candidate.priority < 99 && candidate.name && candidate.boundary.length
       && (candidate.contains || candidate.coverage >= 0.5));
-    candidates.sort((a, b) => b.coverage - a.coverage || Number(b.contains) - Number(a.contains)
-      || b.importance - a.importance);
+    candidates.sort(comparePlaceCandidates);
     const selected = candidates[0] || null;
     containingParkCache.set(cacheKey, selected);
     return selected;
@@ -1027,12 +1257,12 @@ async function lookupParkName(force = false, suppliedPoints = null) {
     elements.parkName.value = suggestedName;
     updateFooter();
     elements.lookupNote.textContent = nearbyPark
-      ? `Containing OSM park: ${suggestedName}. Edit it if needed.`
+      ? `Containing OSM place: ${suggestedName}. Edit it if needed.`
       : `Suggested name: ${suggestedName}. Edit it if needed.`;
     elements.lookupNote.classList.toggle("error", !nearbyPark);
   } catch (error) {
     if (requestId === lookupRequestId) {
-      elements.lookupNote.textContent = `${error.message} You can enter the park name manually.`;
+      elements.lookupNote.textContent = `${error.message} You can enter the place name manually.`;
       elements.lookupNote.classList.add("error");
     }
   } finally {
@@ -1212,7 +1442,7 @@ function loadImage(url) {
   });
 }
 
-async function drawTiles(context, view, width) {
+async function drawTiles(context, view, width, reportProgress = null) {
   const left = view.centerX - width / 2;
   const top = view.centerY - view.mapHeight / 2;
   const tileZoom = Math.floor(view.zoom);
@@ -1224,6 +1454,7 @@ async function drawTiles(context, view, width) {
   const lastY = Math.floor((top + view.mapHeight) / tileSize);
   const tileCount = 2 ** tileZoom;
   const jobs = [];
+  let completed = 0;
   for (let tileY = firstY; tileY <= lastY; tileY += 1) {
     for (let tileX = firstX; tileX <= lastX; tileX += 1) {
       if (tileY < 0 || tileY >= tileCount) continue;
@@ -1231,6 +1462,8 @@ async function drawTiles(context, view, width) {
       const url = TILE_URL.replace("{z}", tileZoom).replace("{x}", wrappedX).replace("{y}", tileY);
       jobs.push(loadImage(url).then((image) => {
         context.drawImage(image, tileX * tileSize - left, tileY * tileSize - top, tileSize, tileSize);
+        completed += 1;
+        if (reportProgress) reportProgress(completed / jobs.length);
       }));
     }
   }
@@ -1247,9 +1480,10 @@ function routePinColor(role) {
   return getComputedStyle(document.documentElement).getPropertyValue(property).trim() || fallback;
 }
 
-function drawPin(context, x, y, color = routePinColor("route")) {
+function drawPin(context, x, y, color = routePinColor("route"), scale = 0.75) {
   context.save();
   context.translate(x, y);
+  context.scale(scale, scale);
   context.shadowColor = "rgb(0 0 0 / 45%)";
   context.shadowBlur = 7;
   context.shadowOffsetY = 2;
@@ -1268,6 +1502,27 @@ function drawPin(context, x, y, color = routePinColor("route")) {
   context.fillStyle = "#ffffff";
   context.fill();
   context.restore();
+}
+
+function exportPinScale(pointCount) {
+  if (pointCount >= 700) return 0.42;
+  if (pointCount >= 400) return 0.5;
+  if (pointCount >= 200) return 0.62;
+  return 0.75;
+}
+
+async function drawCanvasRoutePins(context, points, reportProgress = null) {
+  const scale = exportPinScale(points.length);
+  const batchSize = 100;
+  for (let start = 0; start < points.length; start += batchSize) {
+    const end = Math.min(points.length, start + batchSize);
+    for (let index = start; index < end; index += 1) {
+      const role = index === 0 ? "start" : index === points.length - 1 ? "finish" : "route";
+      drawPin(context, points[index].x, points[index].y, routePinColor(role), role === "route" ? scale : Math.max(scale, 0.68));
+    }
+    if (reportProgress) reportProgress(end / points.length);
+    if (end < points.length) await new Promise((resolve) => setTimeout(resolve, 0));
+  }
 }
 
 function drawBoundaryOnCanvas(context, view, left, top) {
@@ -1338,12 +1593,20 @@ function drawRouteChevrons(context, points, spacing = 72) {
 
 async function downloadMapImage() {
   if (!currentRoute.length) return;
-  if (!osmBoundaryPolygons.length) {
+  const includeBoundary = elements.pngShowBoundary.checked;
+  const includePins = elements.pngShowPins.checked;
+  elements.imageButton.disabled = true;
+  elements.pngShowBoundary.disabled = true;
+  elements.pngShowPins.disabled = true;
+  elements.imageButton.textContent = "Rendering…";
+  showOptimizationProgress(3, "Preparing the map image…");
+  if (includeBoundary && !osmBoundaryPolygons.length) {
     try {
-      showStatus("Checking for a containing OSM park boundary…");
+      showStatus("Checking for a containing OSM place boundary…");
+      showOptimizationProgress(8, "Checking the map area…");
       await ensureOsmParkBoundary(currentRoute);
     } catch (_) {
-      // Non-park routes intentionally export without a boundary.
+      // Routes without a mapped gathering place intentionally export without a boundary.
     }
   }
   const name = elements.parkName.value.trim() || "Unnamed route";
@@ -1353,14 +1616,14 @@ async function downloadMapImage() {
   canvas.width = width;
   canvas.height = height;
   const context = canvas.getContext("2d");
-  const view = exportView(currentRoute, width, height, flattenBoundaryPoints());
-  elements.imageButton.disabled = true;
-  elements.imageButton.textContent = "Rendering…";
+  const view = exportView(currentRoute, width, height, includeBoundary ? flattenBoundaryPoints() : []);
   showStatus("Rendering map image…");
   try {
+    showOptimizationProgress(18, "Preparing the map canvas…");
     context.fillStyle = "#e6ece8";
     context.fillRect(0, 0, width, view.mapHeight);
-    await drawTiles(context, view, width);
+    showOptimizationProgress(25, "Loading map tiles…");
+    await drawTiles(context, view, width, (ratio) => showOptimizationProgress(25 + ratio * 35, "Loading map tiles…"));
     const left = view.centerX - width / 2;
     const top = view.centerY - view.mapHeight / 2;
     const canvasPoints = currentRoute.map((point) => {
@@ -1368,7 +1631,8 @@ async function downloadMapImage() {
       return { x: projected.x - left, y: projected.y - top };
     });
 
-    drawBoundaryOnCanvas(context, view, left, top);
+    showOptimizationProgress(63, "Drawing the route…");
+    if (includeBoundary) drawBoundaryOnCanvas(context, view, left, top);
 
     if (canvasPoints.length > 1) {
       context.beginPath();
@@ -1383,14 +1647,19 @@ async function downloadMapImage() {
       context.stroke();
       drawRouteChevrons(context, canvasPoints);
     }
-    canvasPoints.forEach((point, index) => drawPin(context, point.x, point.y,
-      routePinColor(index === 0 ? "start" : index === canvasPoints.length - 1 ? "finish" : "route")));
+    if (includePins) {
+      await drawCanvasRoutePins(context, canvasPoints,
+        (ratio) => showOptimizationProgress(68 + ratio * 20, "Adding route pins…"));
+    } else {
+      showOptimizationProgress(88, "Drawing the route without pins…");
+    }
 
+    showOptimizationProgress(91, "Adding map details…");
     context.fillStyle = "#14212b";
     context.fillRect(0, view.mapHeight, width, height - view.mapHeight);
     context.fillStyle = "#c9f75d";
     context.font = "800 13px system-ui, sans-serif";
-    context.fillText("PARK / ROUTE", 36, view.mapHeight + 31);
+    context.fillText("PLACE / ROUTE", 36, view.mapHeight + 31);
     context.fillStyle = "#ffffff";
     context.font = "700 25px system-ui, sans-serif";
     context.save();
@@ -1420,14 +1689,19 @@ async function downloadMapImage() {
     context.font = "11px system-ui, sans-serif";
     context.fillText("Map © OpenStreetMap contributors", 36, view.mapHeight + 89);
 
+    showOptimizationProgress(96, "Saving the PNG…");
     const blob = await new Promise((resolve) => canvas.toBlob(resolve, "image/png"));
     if (!blob) throw new Error("The browser could not create the PNG.");
     downloadBlob(blob, safeFilename(name, "png"));
     showStatus("Map PNG downloaded.");
+    finishOptimizationProgress("PNG downloaded");
   } catch (error) {
     showStatus(`${error.message} Try again, or check the internet connection.`, true);
+    elements.optimizationProgress.hidden = true;
   } finally {
     elements.imageButton.disabled = false;
+    elements.pngShowBoundary.disabled = false;
+    elements.pngShowPins.disabled = false;
     elements.imageButton.textContent = "Download map PNG";
   }
 }
