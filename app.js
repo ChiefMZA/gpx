@@ -8,6 +8,10 @@ const LARGE_ROUTE_SEED_LIMIT = 64;
 const LARGE_ROUTE_CANDIDATE_LIMIT = 16;
 const LARGE_ROUTE_TWO_OPT_PASSES = 12;
 const LARGE_ROUTE_RELOCATION_LIMIT = 32;
+const MAX_ROUTE_TOLERANCE_METERS = 80;
+const ROUTE_LINE_WIDTH = 5;
+const PNG_DPI = 100;
+const PNG_EXPORT_SCALE = PNG_DPI / 96;
 const DOM_MARKER_LIMIT = 300;
 const OVERPASS_ENDPOINTS = [
   "https://overpass-api.de/api/interpreter",
@@ -28,6 +32,7 @@ const elements = {
   editOsmBoundary: document.querySelector("#edit-osm-boundary"),
   resetOsmBoundary: document.querySelector("#reset-osm-boundary"),
   buildButton: document.querySelector("#build-button"),
+  routeTolerance: document.querySelector("#route-tolerance"),
   gpxButton: document.querySelector("#gpx-button"),
   txtButton: document.querySelector("#txt-button"),
   imageButton: document.querySelector("#image-button"),
@@ -51,6 +56,7 @@ const elements = {
 };
 
 let currentRoute = [];
+let routeTargets = [];
 let routeLayer = null;
 let markerLayer = null;
 let inputMarkerLayer = null;
@@ -68,6 +74,8 @@ let osmBoundaryEditMode = false;
 let osmBoundaryEdited = false;
 let osmBoundaryMetadata = null;
 let optimizationProgressTimer = null;
+let toleranceTimer = null;
+let routeBuildGeneration = 0;
 const containingParkCache = new Map();
 
 const map = L.map("map", { zoomControl: false, attributionControl: true, preferCanvas: true }).setView([20, 0], 2);
@@ -335,6 +343,97 @@ function routeDistance(route) {
   }
   if (route.length > 1) total += haversineMeters(route[route.length - 1], route[0]);
   return total;
+}
+
+function wrappedLongitudeDelta(degrees) {
+  return ((degrees + 540) % 360) - 180;
+}
+
+function pointToSegmentMeters(point, start, end) {
+  if (start.lat === end.lat && start.lon === end.lon) return haversineMeters(point, start);
+  const referenceLat = (start.lat + end.lat + point.lat) / 3 * Math.PI / 180;
+  const latitudeScale = EARTH_RADIUS_METERS * Math.PI / 180;
+  const longitudeScale = latitudeScale * Math.max(1e-9, Math.cos(referenceLat));
+  const segmentX = wrappedLongitudeDelta(end.lon - start.lon) * longitudeScale;
+  const segmentY = (end.lat - start.lat) * latitudeScale;
+  const pointX = wrappedLongitudeDelta(point.lon - start.lon) * longitudeScale;
+  const pointY = (point.lat - start.lat) * latitudeScale;
+  const lengthSquared = segmentX ** 2 + segmentY ** 2;
+  const position = Math.max(0, Math.min(1, (pointX * segmentX + pointY * segmentY) / lengthSquared));
+  return Math.hypot(pointX - position * segmentX, pointY - position * segmentY);
+}
+
+function routeCoversTargets(route, targets, toleranceMeters) {
+  if (!route.length) return false;
+  if (route.length === 1) {
+    return targets.every((point) => haversineMeters(point, route[0]) <= toleranceMeters + 0.05);
+  }
+  return targets.every((point) => route.some((start, index) =>
+    pointToSegmentMeters(point, start, route[(index + 1) % route.length]) <= toleranceMeters + 0.05));
+}
+
+function simplifyRouteForTolerance(orderedRoute, targets, toleranceMeters) {
+  const tolerance = Number(toleranceMeters);
+  if (!(tolerance > 0) || orderedRoute.length < 2) return [...orderedRoute];
+  const route = orderedRoute.map((point, id) => ({ point, id }));
+  const coverageCounts = new Int32Array(targets.length);
+  const segmentCoverage = new Map();
+  const segmentKey = (start, end) => `${start.id}:${end.id}`;
+  const measureSegment = (start, end) => {
+    const covered = new Uint8Array(targets.length);
+    targets.forEach((target, index) => {
+      if (pointToSegmentMeters(target, start.point, end.point) <= tolerance + 0.05) covered[index] = 1;
+    });
+    return covered;
+  };
+  const addSegment = (start, end, covered = measureSegment(start, end)) => {
+    segmentCoverage.set(segmentKey(start, end), covered);
+    for (let index = 0; index < covered.length; index += 1) coverageCounts[index] += covered[index];
+  };
+  for (let index = 0; index < route.length; index += 1) addSegment(route[index], route[(index + 1) % route.length]);
+
+  let changed = true;
+  while (changed && route.length > 1) {
+    changed = false;
+    const candidates = route.map((node, index) => {
+      const previous = route[(index - 1 + route.length) % route.length];
+      const next = route[(index + 1) % route.length];
+      return { node, saving: haversineMeters(previous.point, node.point)
+        + haversineMeters(node.point, next.point) - haversineMeters(previous.point, next.point) };
+    }).sort((first, second) => second.saving - first.saving);
+
+    for (const { node } of candidates) {
+      if (route.length <= 1) break;
+      const index = route.indexOf(node);
+      if (index < 0) continue;
+      const previous = route[(index - 1 + route.length) % route.length];
+      const next = route[(index + 1) % route.length];
+      const beforeCoverage = segmentCoverage.get(segmentKey(previous, node));
+      const afterCoverage = segmentCoverage.get(segmentKey(node, next));
+      const replacementCoverage = measureSegment(previous, next);
+      let safe = true;
+      for (let targetIndex = 0; targetIndex < targets.length; targetIndex += 1) {
+        if (coverageCounts[targetIndex] - beforeCoverage[targetIndex] - afterCoverage[targetIndex]
+          + replacementCoverage[targetIndex] <= 0) {
+          safe = false;
+          break;
+        }
+      }
+      if (!safe) continue;
+
+      segmentCoverage.delete(segmentKey(previous, node));
+      segmentCoverage.delete(segmentKey(node, next));
+      for (let targetIndex = 0; targetIndex < targets.length; targetIndex += 1) {
+        coverageCounts[targetIndex] += replacementCoverage[targetIndex]
+          - beforeCoverage[targetIndex] - afterCoverage[targetIndex];
+      }
+      segmentCoverage.set(segmentKey(previous, next), replacementCoverage);
+      route.splice(index, 1);
+      changed = true;
+    }
+  }
+  const simplified = route.map(({ point }) => point);
+  return routeCoversTargets(simplified, targets, tolerance) ? simplified : [...orderedRoute];
 }
 
 function distanceMatrix(points) {
@@ -780,10 +879,16 @@ function getInputPoints() {
 
 function updateFooter() {
   elements.footerName.textContent = elements.parkName.value.trim() || "Unnamed route";
-  elements.footerPoints.textContent = String(currentRoute.length || inputPreviewPoints.length);
+  elements.footerPoints.textContent = String(routeTargets.length || currentRoute.length || inputPreviewPoints.length);
   elements.footerDistance.textContent = currentRoute.length
     ? (routeDistance(currentRoute) / 1000).toFixed(2)
     : inputPreviewPoints.length ? "—" : "0.00";
+}
+
+function routePointRole(point, route = currentRoute) {
+  if (point === route[0]) return "start";
+  if (route.length > 1 && point === route[route.length - 1]) return "finish";
+  return "route";
 }
 
 function setMapAddMode(active) {
@@ -851,6 +956,7 @@ function removeCoordinatePoint(point) {
     return;
   }
   parsed.points.splice(removeIndex, 1);
+  routeTargets = [...parsed.points];
   elements.coordinates.value = parsed.points.map((item) => `${formatNumber(item.lat)},${formatNumber(item.lon)}`).join("\n");
   pendingMapPoints = pendingMapPoints.filter((item) => haversineMeters(item, point) >= 1);
   currentRoute = currentRoute.filter((item) => haversineMeters(item, point) >= 1);
@@ -891,8 +997,11 @@ function addPointFromMap(event) {
 }
 
 function invalidateRoute(message = "") {
+  routeBuildGeneration += 1;
+  elements.buildButton.disabled = false;
   const hadBuiltRoute = currentRoute.length > 0 || !elements.actions.hidden;
   currentRoute = [];
+  routeTargets = [];
   elements.actions.hidden = true;
   setMapAddMode(false);
   elements.mapAddButton.hidden = true;
@@ -953,61 +1062,59 @@ function drawRoute() {
 
   const latLngs = currentRoute.map((point) => [point.lat, point.lon]);
   const loopLatLngs = currentRoute.length > 1 ? [...latLngs, latLngs[0]] : latLngs;
-  routeLayer = L.polyline(loopLatLngs, { color: "#f24a2e", weight: 5, opacity: 0.95 }).addTo(map);
+  routeLayer = L.polyline(loopLatLngs, { color: "#f24a2e", weight: ROUTE_LINE_WIDTH, opacity: 0.95 }).addTo(map);
   markerLayer = L.layerGroup().addTo(map);
-  const lightweightMarkers = currentRoute.length > DOM_MARKER_LIMIT;
-  currentRoute.forEach((point, index) => {
-    const markerRole = index === 0 ? "start" : index === currentRoute.length - 1 ? "finish" : "route";
-    if (lightweightMarkers) {
-      const compactRole = markerRole === "route" ? "" : ` ${markerRole}`;
-      const icon = L.divIcon({ className: "route-marker", html: `<div class="compact-map-pin${compactRole}"></div>`, iconSize: [12, 16], iconAnchor: [6, 15] });
-      const marker = L.marker([point.lat, point.lon], { icon, bubblingMouseEvents: false })
-        .bindTooltip(`${markerRole === "start" ? "Start" : markerRole === "finish" ? "Last point" : `Point ${index + 1}`}<br>${formatNumber(point.lat)}, ${formatNumber(point.lon)}${mapAddMode ? "<br>Click to remove" : ""}`);
-      marker.on("click", () => { if (mapAddMode) showRemovePointPopup(point); });
-      marker.addTo(markerLayer);
-      return;
-    }
-    const icon = L.divIcon({
-      className: "route-marker",
-      html: `<div class="route-pin ${markerRole}-pin"></div>`,
-      iconSize: [22, 29],
-      iconAnchor: [11, 27],
-    });
+  const displayedTargets = routeTargets.length ? routeTargets : currentRoute;
+  displayedTargets.forEach((point, index) => {
+    const role = routePointRole(point);
+    const roleClass = role === "route" ? "" : ` ${role}`;
+    const icon = L.divIcon({ className: "route-marker", html: `<div class="compact-map-pin${roleClass}"></div>`, iconSize: [12, 16], iconAnchor: [6, 15] });
     const marker = L.marker([point.lat, point.lon], { icon, bubblingMouseEvents: false })
-      .bindTooltip(`${markerRole === "start" ? "Start" : markerRole === "finish" ? "Last point" : `Point ${index + 1}`}<br>${formatNumber(point.lat)}, ${formatNumber(point.lon)}${mapAddMode ? "<br>Click to remove" : ""}`);
-    marker.on("click", () => {
-      if (mapAddMode) showRemovePointPopup(point);
-    });
+      .bindTooltip(`Target point ${index + 1}<br>${formatNumber(point.lat)}, ${formatNumber(point.lon)}${mapAddMode ? "<br>Click to remove" : ""}`);
+    marker.on("click", () => { if (mapAddMode) showRemovePointPopup(point); });
     marker.addTo(markerLayer);
   });
   drawOsmBoundary();
   if (osmBoundaryPolygons.length) {
     const displayBounds = routeLayer.getBounds();
+    displayedTargets.forEach((point) => displayBounds.extend([point.lat, point.lon]));
     flattenBoundaryPoints().forEach((point) => displayBounds.extend([point.lat, point.lon]));
     map.fitBounds(displayBounds, { padding: [45, 45], maxZoom: 17 });
-  } else if (currentRoute.length === 1) map.setView(latLngs[0], 17);
-  else map.fitBounds(routeLayer.getBounds(), { padding: [45, 45], maxZoom: 17 });
+  } else if (displayedTargets.length === 1) map.setView([displayedTargets[0].lat, displayedTargets[0].lon], 17);
+  else map.fitBounds(L.latLngBounds(displayedTargets.map((point) => [point.lat, point.lon])), { padding: [45, 45], maxZoom: 17 });
   elements.emptyMap.hidden = true;
   setTimeout(() => map.invalidateSize(), 0);
 }
 
 async function buildRoute() {
+  const generation = ++routeBuildGeneration;
   let parsed;
+  let tolerance;
   try {
     parsed = getInputPoints();
+    tolerance = Number(elements.routeTolerance.value);
+    if (!Number.isFinite(tolerance) || tolerance < 0 || tolerance > MAX_ROUTE_TOLERANCE_METERS) {
+      throw new Error(`Pass distance must be between 0 and ${MAX_ROUTE_TOLERANCE_METERS} metres.`);
+    }
   } catch (_) {
+    if (generation === routeBuildGeneration) elements.buildButton.disabled = false;
     return;
   }
   elements.buildButton.disabled = true;
   showStatus(`Optimizing ${parsed.points.length} points…`);
   showOptimizationProgress(2, "Preparing the points…");
   await new Promise((resolve) => requestAnimationFrame(() => setTimeout(resolve, 0)));
+  let optimizedRoute;
   try {
-    currentRoute = await optimizeRouteAsync(parsed.points, showOptimizationProgress);
+    optimizedRoute = await optimizeRouteAsync(parsed.points, showOptimizationProgress);
   } catch (_) {
     showOptimizationProgress(25, "Continuing route optimization…");
-    currentRoute = optimizeRoute(parsed.points);
+    optimizedRoute = optimizeRoute(parsed.points);
   }
+  if (generation !== routeBuildGeneration) return;
+  showOptimizationProgress(98, tolerance > 0 ? "Applying pass distance…" : "Finalizing the route…");
+  currentRoute = simplifyRouteForTolerance(optimizedRoute, parsed.points, tolerance);
+  routeTargets = [...parsed.points];
   clearPendingMapPoints();
   drawRoute();
   updateFooter();
@@ -1016,7 +1123,10 @@ async function buildRoute() {
   elements.mapAddButton.hidden = false;
   setMapAddMode(false);
   const duplicateText = parsed.duplicates ? ` ${parsed.duplicates} duplicate(s) removed.` : "";
-  showStatus(`Route ready: ${currentRoute.length} points, ${(routeDistance(currentRoute) / 1000).toFixed(2)} km.${duplicateText}`);
+  const waypointText = tolerance > 0
+    ? `${routeTargets.length} targets covered by ${currentRoute.length} route waypoint${currentRoute.length === 1 ? "" : "s"} within ${tolerance} m`
+    : `${currentRoute.length} points`;
+  showStatus(`Route ready: ${waypointText}, ${(routeDistance(currentRoute) / 1000).toFixed(2)} km.${duplicateText}`);
   finishOptimizationProgress();
   elements.buildButton.disabled = false;
 }
@@ -1385,6 +1495,51 @@ function downloadBlob(blob, filename) {
   setTimeout(() => URL.revokeObjectURL(link.href), 1000);
 }
 
+function pngCrc32(bytes) {
+  let crc = 0xffffffff;
+  for (const byte of bytes) {
+    crc ^= byte;
+    for (let bit = 0; bit < 8; bit += 1) crc = (crc >>> 1) ^ (0xedb88320 & -(crc & 1));
+  }
+  return (crc ^ 0xffffffff) >>> 0;
+}
+
+function pngPhysicalResolutionChunk(dpi) {
+  const type = Uint8Array.from([112, 72, 89, 115]);
+  const data = new Uint8Array(9);
+  const pixelsPerMeter = Math.round(dpi / 0.0254);
+  const dataView = new DataView(data.buffer);
+  dataView.setUint32(0, pixelsPerMeter);
+  dataView.setUint32(4, pixelsPerMeter);
+  data[8] = 1;
+  const chunk = new Uint8Array(21);
+  const chunkView = new DataView(chunk.buffer);
+  chunkView.setUint32(0, data.length);
+  chunk.set(type, 4);
+  chunk.set(data, 8);
+  chunkView.setUint32(17, pngCrc32(chunk.subarray(4, 17)));
+  return chunk;
+}
+
+async function setPngDpi(blob, dpi) {
+  const bytes = new Uint8Array(await blob.arrayBuffer());
+  const parts = [bytes.subarray(0, 8)];
+  const resolutionChunk = pngPhysicalResolutionChunk(dpi);
+  let inserted = false;
+  for (let offset = 8; offset + 12 <= bytes.length;) {
+    const length = new DataView(bytes.buffer, bytes.byteOffset + offset, 4).getUint32(0);
+    const end = offset + length + 12;
+    const type = String.fromCharCode(...bytes.subarray(offset + 4, offset + 8));
+    if (!inserted && (type === "IDAT" || type === "IEND")) {
+      parts.push(resolutionChunk);
+      inserted = true;
+    }
+    if (type !== "pHYs") parts.push(bytes.subarray(offset, end));
+    offset = end;
+  }
+  return new Blob(parts, { type: "image/png" });
+}
+
 function downloadGpx() {
   if (!currentRoute.length) return;
   const name = elements.parkName.value.trim() || "Unnamed route";
@@ -1480,45 +1635,47 @@ function routePinColor(role) {
   return getComputedStyle(document.documentElement).getPropertyValue(property).trim() || fallback;
 }
 
-function drawPin(context, x, y, color = routePinColor("route"), scale = 0.75) {
+function drawPin(context, x, y, color = routePinColor("route"), compact = false) {
+  const size = compact ? 12 : 22;
+  const borderWidth = compact ? 1.5 : 3;
+  const inset = compact ? 4 : 5;
+  const centerOffsetX = 0;
+  const centerOffsetY = compact ? -9 : -16;
+  const cornerRadius = (size - borderWidth) / 2;
   context.save();
-  context.translate(x, y);
-  context.scale(scale, scale);
-  context.shadowColor = "rgb(0 0 0 / 45%)";
-  context.shadowBlur = 7;
-  context.shadowOffsetY = 2;
+  context.translate(x + centerOffsetX, y + centerOffsetY);
+  context.rotate(-Math.PI / 4);
+  context.shadowColor = compact ? "rgb(0 0 0 / 38%)" : "rgb(0 0 0 / 45%)";
+  context.shadowBlur = compact ? 2 : 7;
+  context.shadowOffsetY = compact ? 1 : 2;
   context.beginPath();
-  context.arc(0, -10, 10, Math.PI * 0.12, Math.PI * 0.88, true);
-  context.lineTo(0, 8);
-  context.closePath();
+  context.roundRect(-size / 2 + borderWidth / 2, -size / 2 + borderWidth / 2,
+    size - borderWidth, size - borderWidth,
+    [cornerRadius, cornerRadius, cornerRadius, 0]);
   context.fillStyle = color;
   context.fill();
   context.shadowColor = "transparent";
-  context.lineWidth = 3;
+  context.lineWidth = borderWidth;
   context.strokeStyle = "#ffffff";
   context.stroke();
   context.beginPath();
-  context.arc(0, -10, 3.5, 0, Math.PI * 2);
+  context.arc(0, 0, (size - inset * 2) / 2, 0, Math.PI * 2);
   context.fillStyle = "#ffffff";
   context.fill();
   context.restore();
 }
 
 function exportPinScale(pointCount) {
-  if (pointCount >= 700) return 0.42;
-  if (pointCount >= 400) return 0.5;
-  if (pointCount >= 200) return 0.62;
-  return 0.75;
+  return 0.5;
 }
 
 async function drawCanvasRoutePins(context, points, reportProgress = null) {
-  const scale = exportPinScale(points.length);
+  const compact = true;
   const batchSize = 100;
   for (let start = 0; start < points.length; start += batchSize) {
     const end = Math.min(points.length, start + batchSize);
     for (let index = start; index < end; index += 1) {
-      const role = index === 0 ? "start" : index === points.length - 1 ? "finish" : "route";
-      drawPin(context, points[index].x, points[index].y, routePinColor(role), role === "route" ? scale : Math.max(scale, 0.68));
+      drawPin(context, points[index].x, points[index].y, routePinColor(points[index].role || "route"), compact);
     }
     if (reportProgress) reportProgress(end / points.length);
     if (end < points.length) await new Promise((resolve) => setTimeout(resolve, 0));
@@ -1604,7 +1761,7 @@ async function downloadMapImage() {
     try {
       showStatus("Checking for a containing OSM place boundary…");
       showOptimizationProgress(8, "Checking the map area…");
-      await ensureOsmParkBoundary(currentRoute);
+      await ensureOsmParkBoundary(routeTargets.length ? routeTargets : currentRoute);
     } catch (_) {
       // Routes without a mapped gathering place intentionally export without a boundary.
     }
@@ -1613,10 +1770,12 @@ async function downloadMapImage() {
   const width = 1200;
   const height = 800;
   const canvas = document.createElement("canvas");
-  canvas.width = width;
-  canvas.height = height;
+  canvas.width = Math.round(width * PNG_EXPORT_SCALE);
+  canvas.height = Math.round(height * PNG_EXPORT_SCALE);
   const context = canvas.getContext("2d");
-  const view = exportView(currentRoute, width, height, includeBoundary ? flattenBoundaryPoints() : []);
+  context.scale(PNG_EXPORT_SCALE, PNG_EXPORT_SCALE);
+  const targetPoints = routeTargets.length ? routeTargets : currentRoute;
+  const view = exportView([...currentRoute, ...targetPoints], width, height, includeBoundary ? flattenBoundaryPoints() : []);
   showStatus("Rendering map image…");
   try {
     showOptimizationProgress(18, "Preparing the map canvas…");
@@ -1630,6 +1789,11 @@ async function downloadMapImage() {
       const projected = worldPoint(point, view.zoom);
       return { x: projected.x - left, y: projected.y - top };
     });
+    const canvasTargets = targetPoints.map((point) => {
+      const projected = worldPoint(point, view.zoom);
+      const role = routePointRole(point);
+      return { x: projected.x - left, y: projected.y - top, role };
+    });
 
     showOptimizationProgress(63, "Drawing the route…");
     if (includeBoundary) drawBoundaryOnCanvas(context, view, left, top);
@@ -1639,16 +1803,15 @@ async function downloadMapImage() {
       [...canvasPoints, canvasPoints[0]].forEach((point, index) => index ? context.lineTo(point.x, point.y) : context.moveTo(point.x, point.y));
       context.lineJoin = "round";
       context.lineCap = "round";
-      context.strokeStyle = "rgba(255,255,255,.9)";
-      context.lineWidth = 11;
-      context.stroke();
       context.strokeStyle = "#f24a2e";
-      context.lineWidth = 6;
+      context.lineWidth = ROUTE_LINE_WIDTH;
+      context.globalAlpha = 0.95;
       context.stroke();
+      context.globalAlpha = 1;
       drawRouteChevrons(context, canvasPoints);
     }
     if (includePins) {
-      await drawCanvasRoutePins(context, canvasPoints,
+      await drawCanvasRoutePins(context, canvasTargets,
         (ratio) => showOptimizationProgress(68 + ratio * 20, "Adding route pins…"));
     } else {
       showOptimizationProgress(88, "Drawing the route without pins…");
@@ -1670,7 +1833,7 @@ async function downloadMapImage() {
     context.restore();
     context.textAlign = "right";
     context.font = "700 25px system-ui, sans-serif";
-    context.fillText(`${currentRoute.length} points   •   ${(routeDistance(currentRoute) / 1000).toFixed(2)} km`, width - 36, view.mapHeight + 57);
+    context.fillText(`${targetPoints.length} points   •   ${(routeDistance(currentRoute) / 1000).toFixed(2)} km`, width - 36, view.mapHeight + 57);
     context.font = '800 14px "Arial Rounded MT Bold", system-ui, sans-serif';
     const credit = "Tool created by chiefmza";
     const creditWidth = context.measureText(credit).width + 20;
@@ -1692,8 +1855,9 @@ async function downloadMapImage() {
     showOptimizationProgress(96, "Saving the PNG…");
     const blob = await new Promise((resolve) => canvas.toBlob(resolve, "image/png"));
     if (!blob) throw new Error("The browser could not create the PNG.");
-    downloadBlob(blob, safeFilename(name, "png"));
-    showStatus("Map PNG downloaded.");
+    const highResolutionBlob = await setPngDpi(blob, PNG_DPI);
+    downloadBlob(highResolutionBlob, safeFilename(name, "png"));
+    showStatus(`${PNG_DPI} DPI map PNG downloaded.`);
     finishOptimizationProgress("PNG downloaded");
   } catch (error) {
     showStatus(`${error.message} Try again, or check the internet connection.`, true);
@@ -1707,6 +1871,17 @@ async function downloadMapImage() {
 }
 
 elements.buildButton.addEventListener("click", buildRoute);
+elements.routeTolerance.addEventListener("input", () => {
+  clearTimeout(toleranceTimer);
+  const tolerance = Number(elements.routeTolerance.value);
+  if (!Number.isFinite(tolerance) || tolerance < 0 || tolerance > MAX_ROUTE_TOLERANCE_METERS) {
+    showStatus(`Pass distance must be between 0 and ${MAX_ROUTE_TOLERANCE_METERS} metres.`, true);
+    return;
+  }
+  if (!currentRoute.length || elements.actions.hidden) return;
+  showStatus(`Pass distance changed to ${tolerance} m. Re-optimizing…`);
+  toleranceTimer = setTimeout(() => { void buildRoute(); }, 450);
+});
 elements.editOsmBoundary.addEventListener("click", () => {
   if (osmBoundaryEditMode) finishOsmBoundaryEditing();
   else startOsmBoundaryEditing();
@@ -1761,6 +1936,7 @@ elements.clearButton.addEventListener("click", () => {
 });
 
 window.GpxRouteCreator = {
-  parseCoordinates, parseImportedFile, haversineMeters, routeDistance, optimizeRoute,
+  parseCoordinates, parseImportedFile, haversineMeters, pointToSegmentMeters, routeDistance,
+  routeCoversTargets, simplifyRouteForTolerance, optimizeRoute,
   parkNameFromResult, safeFilename, createGpx, exportView,
 };
